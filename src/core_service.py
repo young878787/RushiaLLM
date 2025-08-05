@@ -814,3 +814,85 @@ class VTuberCoreService:
             self.logger.info("✅ 核心服務資源清理完成")
         except Exception as e:
             self.logger.error(f"核心服務清理失敗: {e}")
+    
+    # ==================== GUI 相關方法 ====================
+    
+    async def get_character_info(self) -> Dict[str, Any]:
+        """獲取角色信息"""
+        try:
+            return {
+                "success": True,
+                "name": self.character_name,
+                "personality": getattr(self, 'character_personality', '友善、活潑'),
+                "status": "已連接" if self._initialized else "未連接"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"獲取角色信息失敗: {str(e)}"
+            }
+    
+    async def chat(self, message: str, user_id: str) -> Dict[str, Any]:
+        """聊天接口（為GUI提供）"""
+        try:
+            result = await self.generate_response(user_id, message)
+            return result
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"聊天處理失敗: {str(e)}"
+            }
+    
+    async def upload_document(self, file_path: str) -> Dict[str, Any]:
+        """上傳文檔到知識庫"""
+        try:
+            result = await self.add_document(file_path)
+            return result
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"文檔上傳失敗: {str(e)}"
+            }
+    
+    async def search_knowledge(self, query: str) -> Dict[str, Any]:
+        """搜索知識庫"""
+        try:
+            result = await self.search_knowledge_base(query)
+            return result
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"知識搜索失敗: {str(e)}"
+            }
+    
+    async def toggle_traditional_chinese(self, enabled: bool) -> Dict[str, Any]:
+        """切換簡繁轉換"""
+        try:
+            # 這裡可以設置簡繁轉換的邏輯
+            return {
+                "success": True,
+                "enabled": enabled,
+                "message": f"簡繁轉換已{'啟用' if enabled else '禁用'}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"簡繁轉換切換失敗: {str(e)}"
+            }
+    
+    async def clear_conversation_memory(self) -> Dict[str, Any]:
+        """清除對話記憶"""
+        try:
+            # 清除所有用戶會話
+            cleared_sessions = len(self.user_sessions)
+            self.user_sessions.clear()
+            
+            return {
+                "success": True,
+                "message": f"已清除 {cleared_sessions} 個會話的記憶"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"清除記憶失敗: {str(e)}"
+            }

@@ -63,7 +63,7 @@ async def main():
         # 現在才導入GUI模組（確保依賴已安裝）
         from src.core_service import VTuberCoreService
         from src.utils.logger import setup_logger
-        from gui_main import VTuberCustomGUI
+        from gui import VTuberCustomGUI
         
         # 載入配置
         config = load_config()
