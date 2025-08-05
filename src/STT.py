@@ -24,8 +24,9 @@ except ImportError:
 
 # 支援的語言
 class STTLanguage(Enum):
-    CHINESE_TRADITIONAL = "zh-TW"
-    CHINESE_SIMPLIFIED = "zh-CN" 
+    CHINESE_TRADITIONAL = "zh"  # Whisper 使用 zh 來處理中文（包含繁體和簡體）
+    CHINESE_SIMPLIFIED = "zh"   # Whisper 使用 zh 來處理中文（包含繁體和簡體）
+    CHINESE_CANTONESE = "yue"   # 粵語
     ENGLISH = "en"
     JAPANESE = "ja"
     KOREAN = "ko"
@@ -76,7 +77,7 @@ class STTConfig:
     # 即時轉錄配置  
     enable_realtime_transcription: bool = False  # 啟用即時轉錄 (預設關閉以避免複雜性)
     realtime_processing_pause: float = 0.2  # 即時處理間隔 (RealtimeSTT 預設值)
-    realtime_model_type: str = "tiny"  # 即時轉錄模型
+    realtime_model_type: str = "base"  # 即時轉錄模型
     
     # GPU 配置
     use_gpu: bool = True
@@ -138,7 +139,17 @@ class RealtimeSTTService:
         # 語言設定
         language_str = stt_config.get('language', 'zh-TW')
         try:
-            config_dict['language'] = STTLanguage(language_str)
+            # 映射用戶輸入到實際的 Whisper 語言代碼
+            language_mapping = {
+                'zh-TW': STTLanguage.CHINESE_TRADITIONAL,
+                'zh-CN': STTLanguage.CHINESE_SIMPLIFIED,
+                'zh': STTLanguage.CHINESE_TRADITIONAL,
+                'yue': STTLanguage.CHINESE_CANTONESE,
+                'en': STTLanguage.ENGLISH,
+                'ja': STTLanguage.JAPANESE,
+                'ko': STTLanguage.KOREAN
+            }
+            config_dict['language'] = language_mapping.get(language_str, STTLanguage.CHINESE_TRADITIONAL)
         except ValueError:
             self.logger.warning(f"不支援的語言: {language_str}，使用預設值")
             config_dict['language'] = STTLanguage.CHINESE_TRADITIONAL
@@ -372,7 +383,7 @@ class RealtimeSTTService:
         self.logger.debug("⚫ 停止錄音")
         self._trigger_recording_callbacks("recording_stop", {"timestamp": datetime.now()})
     
-    def _on_transcription_start(self):
+    def _on_transcription_start(self, *args):
         """轉錄開始回調"""
         self.logger.debug("📝 開始轉錄")
         self._trigger_recording_callbacks("transcription_start", {"timestamp": datetime.now()})
@@ -382,11 +393,37 @@ class RealtimeSTTService:
         for callback in self.transcription_callbacks:
             try:
                 if asyncio.iscoroutinefunction(callback):
-                    asyncio.create_task(callback(result))
+                    # 在新的線程中運行異步回調
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # 如果事件循環正在運行，使用 call_soon_threadsafe
+                            loop.call_soon_threadsafe(self._schedule_async_callback, callback, result)
+                        else:
+                            # 如果事件循環沒有運行，創建新任務
+                            asyncio.create_task(callback(result))
+                    except RuntimeError:
+                        # 沒有事件循環，在新線程中運行
+                        threading.Thread(
+                            target=self._run_async_callback, 
+                            args=(callback, result), 
+                            daemon=True
+                        ).start()
                 else:
                     callback(result)
             except Exception as e:
                 self.logger.error(f"轉錄回調執行失敗: {e}")
+    
+    def _schedule_async_callback(self, callback, *args):
+        """在事件循環中安排異步回調"""
+        asyncio.create_task(callback(*args))
+    
+    def _run_async_callback(self, callback, *args):
+        """在新事件循環中運行異步回調"""
+        try:
+            asyncio.run(callback(*args))
+        except Exception as e:
+            self.logger.error(f"異步回調執行失敗: {e}")
     
     def _trigger_realtime_callbacks(self, result: TranscriptionResult):
         """觸發即時轉錄回調"""
@@ -398,11 +435,37 @@ class RealtimeSTTService:
         for callback in self.recording_callbacks:
             try:
                 if asyncio.iscoroutinefunction(callback):
-                    asyncio.create_task(callback(event_type, data))
+                    # 在新的線程中運行異步回調
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # 如果事件循環正在運行，使用 call_soon_threadsafe
+                            loop.call_soon_threadsafe(self._schedule_async_recording_callback, callback, event_type, data)
+                        else:
+                            # 如果事件循環沒有運行，創建新任務
+                            asyncio.create_task(callback(event_type, data))
+                    except RuntimeError:
+                        # 沒有事件循環，在新線程中運行
+                        threading.Thread(
+                            target=self._run_async_recording_callback, 
+                            args=(callback, event_type, data), 
+                            daemon=True
+                        ).start()
                 else:
                     callback(event_type, data)
             except Exception as e:
                 self.logger.error(f"錄音回調執行失敗: {e}")
+    
+    def _schedule_async_recording_callback(self, callback, event_type, data):
+        """在事件循環中安排異步錄音回調"""
+        asyncio.create_task(callback(event_type, data))
+    
+    def _run_async_recording_callback(self, callback, event_type, data):
+        """在新事件循環中運行異步錄音回調"""
+        try:
+            asyncio.run(callback(event_type, data))
+        except Exception as e:
+            self.logger.error(f"異步錄音回調執行失敗: {e}")
     
     def _trigger_error_callbacks(self, error_message: str):
         """觸發錯誤回調"""
@@ -412,11 +475,37 @@ class RealtimeSTTService:
         for callback in self.error_callbacks:
             try:
                 if asyncio.iscoroutinefunction(callback):
-                    asyncio.create_task(callback(error_message))
+                    # 在新的線程中運行異步回調
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # 如果事件循環正在運行，使用 call_soon_threadsafe
+                            loop.call_soon_threadsafe(self._schedule_async_error_callback, callback, error_message)
+                        else:
+                            # 如果事件循環沒有運行，創建新任務
+                            asyncio.create_task(callback(error_message))
+                    except RuntimeError:
+                        # 沒有事件循環，在新線程中運行
+                        threading.Thread(
+                            target=self._run_async_error_callback, 
+                            args=(callback, error_message), 
+                            daemon=True
+                        ).start()
                 else:
                     callback(error_message)
             except Exception as e:
                 self.logger.error(f"錯誤回調執行失敗: {e}")
+    
+    def _schedule_async_error_callback(self, callback, error_message):
+        """在事件循環中安排異步錯誤回調"""
+        asyncio.create_task(callback(error_message))
+    
+    def _run_async_error_callback(self, callback, error_message):
+        """在新事件循環中運行異步錯誤回調"""
+        try:
+            asyncio.run(callback(error_message))
+        except Exception as e:
+            self.logger.error(f"異步錯誤回調執行失敗: {e}")
     
     # ==================== 回調註冊 ====================
     
@@ -597,10 +686,10 @@ def test_stt_service():
             config = {
                 'stt': {
                     'language': 'zh-TW',
-                    'model': 'tiny',  # 使用較小的模型進行測試
+                    'model': 'base',  # 使用 base 模型
                     'enable_realtime_transcription': False,  # 先關閉即時轉錄
                     'silero_sensitivity': 0.4,  # 使用預設值
-                    'use_gpu': False  # 先使用 CPU 避免 GPU 相關問題
+                    'use_gpu': True  # 使用 GPU 加速
                 }
             }
             

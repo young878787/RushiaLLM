@@ -19,7 +19,7 @@ stt:
   # 即時轉錄設定
   enable_realtime_transcription: true  # 啟用即時轉錄
   realtime_processing_pause: 0.02      # 即時處理間隔 (秒)
-  realtime_model_type: "tiny"          # 即時轉錄使用的模型
+  realtime_model_type: "base"          # 即時轉錄使用的模型
   
   # GPU 設定
   use_gpu: true                    # 是否使用 GPU 加速
