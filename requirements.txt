@@ -1,0 +1,39 @@
+# Core LLM dependencies
+torch>=2.1.0
+transformers>=4.35.0
+accelerate>=0.24.0
+bitsandbytes>=0.41.0
+optimum>=1.14.0
+
+# Embedding and Vector DB
+sentence-transformers>=2.2.2
+faiss-cpu>=1.7.4
+chromadb>=0.4.15
+
+# RAG and Text Processing
+langchain>=0.0.350
+langchain-community>=0.0.10
+pypdf>=3.17.0
+python-docx>=0.8.11
+beautifulsoup4>=4.12.2
+
+# Terminal Interface
+colorama>=0.4.6
+
+# Utilities
+numpy>=1.24.0
+pandas>=2.1.0
+tqdm>=4.66.0
+colorama>=0.4.6
+psutil>=5.9.0
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# Discord Bot
+discord.py>=2.3.0
+
+# Text Processing
+opencc-python-reimplemented>=0.1.7
+
+# Windows optimization
+pywin32>=306; sys_platform == "win32"

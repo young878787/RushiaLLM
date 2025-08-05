@@ -1,0 +1,167 @@
+# VTuber AI LLM 配置文件
+
+# 模型配置
+models:
+  llm:
+    model_path: "models/Qwen3-8B"
+    device: "cuda"
+    quantization: "4bit"
+    max_length: 4096
+    # 優化的生成參數
+    temperature: 0.75
+    top_p: 0.8
+    top_k: 40
+    repetition_penalty: 1.15
+    no_repeat_ngram_size: 3
+    length_penalty: 1.0
+    early_stopping: true
+    
+  embedding:
+    model_path: "models/Qwen3-Embedding-0.6B"
+    device: "cuda"
+    batch_size: 32
+    max_length: 512
+
+# RAG 配置
+rag:
+  vector_db:
+    type: "chroma"
+    persist_directory: "./scrpitsV2/LLM/data/vectordb"
+    collection_name: "vtuber_knowledge"
+  
+  retrieval:
+    top_k: 5
+    similarity_threshold: 0.4
+    chunk_size: 1000
+    chunk_overlap: 200
+  
+  # RAG 檢索內容配置
+  content_types:
+    dialogue_examples: true           # 對話範例
+    emotional_expressions: true      # 情感表達
+    comfort_phrases: true            # 安慰話語
+    intimate_interactions: true      # 親密互動
+    personality_traits: true         # 人格特徵
+    
+  retrieval_strategy:
+    emotion_weighted: true           # 情感加權檢索
+    intent_focused: true             # 意圖聚焦檢索
+    intimacy_filtered: true          # 親密度過濾
+    context_aware: true              # 上下文感知
+
+# VTuber 回應配置 (角色設定完全由 core.json 管理)
+vtuber:
+  response:
+    max_tokens: 150     # 調整為150 ≈ 75-100 中文字
+    min_tokens: 25      # 調整為25 ≈ 12-18 中文字
+
+    stream: true
+    add_personality: true
+    # 回應過濾設置
+    filter_repetition: true
+    filter_incomplete: true
+    max_sentence_repeat: 1
+    
+    # 智慧換行設置
+    enable_line_break: true             # 啟用智慧換行處理
+    
+    # 人性化對話節奏設置
+    enable_typing_simulation: true      # 啟用打字模擬
+    typing_speed: 1.2                   # 每行間隔時間（秒）
+    typing_speed_variation: 0.3         # 時間變化幅度（±秒）
+    typing_min_delay: 0.5               # 最小間隔時間（秒）
+    typing_max_delay: 2.0               # 最大間隔時間（秒）
+    
+    # 簡繁轉換設置
+    enable_traditional_chinese: true    # 啟用簡體轉繁體
+    opencc_config: "s2twp.json"        # OpenCC 配置文件：s2twp.json (簡體到繁體+詞彙轉換) 
+    
+    # 情感適應性回應
+    emotional_adaptation:
+      enabled: true
+      comfort_mode: true              # 安慰模式
+      excitement_sharing: true        # 情緒共鳴
+      gentle_correction: true         # 溫柔糾正
+      
+    # 親密度感知回應
+    intimacy_awareness:
+      enabled: true
+      progressive_closeness: true     # 漸進式親密
+      appropriate_boundaries: true    # 適當邊界
+      natural_affection: true         # 自然情感表達
+
+# 語義分析與情感理解配置
+semantic_analysis:
+  enabled: true
+  description: "露西亞更好地理解用戶的情感和意圖"
+  
+  modules:
+    emotion_analyzer: true      # 情感理解
+    intent_recognizer: true     # 意圖識別  
+    intimacy_calculator: true   # 親密度感知
+    context_analyzer: true      # 對話脈絡理解
+  
+  # 情感回應增強
+  emotional_enhancement:
+    sensitivity_level: "high"           # 情感敏感度：high/medium/low
+    empathy_factor: 1.8                # 共情能力係數
+    emotional_memory_length: 8         # 情感記憶長度
+    intimacy_growth_rate: 0.1          # 親密度增長速度
+  
+  # 自然語言指導
+  natural_guidance:
+    use_technical_terms: false         # 避免技術術語
+    prefer_emotional_language: true    # 偏好情感化語言
+    personality_consistency: true      # 保持人格一致性
+    response_warmth_level: "high"      # 回應溫暖度
+
+# API 配置
+api:
+  host: "127.0.0.1"
+  port: 8000
+  workers: 1
+  log_level: "info"
+  cors_origins: ["*"]
+
+# 系統優化 (Windows 11)
+system:
+
+  performance_optimization:
+    enable_llm_cache: true
+    cache_size: 500
+    enable_rag_cache: true
+    rag_cache_ttl: 3600
+    enable_semantic_cache: true
+
+  memory_optimization: true
+  gpu_memory_fraction: 0.8
+  cpu_threads: -1  # 使用所有可用核心
+  cache_dir: "./scrpitsV2/LLM/data/cache"
+  log_dir: "./scrpitsV2/LLM/logs"
+
+  # 語義分析系統優化
+  semantic_optimization:
+    enable_caching: true               # 啟用語義分析結果緩存
+    cache_size: 1000                   # 緩存大小
+    analysis_timeout: 5.0              # 分析超時時間(秒)
+    fallback_mode: "graceful"          # 降級模式：graceful/disabled
+
+# 整合功能狀態
+integration_status:
+  core_semantic_analysis: true         # Core.py 語義分析整合
+  llm_manager_enhancement: true        # LLM Manager 增強
+  rag_semantic_search: true            # RAG 語義搜索
+  knowledge_base_integration: true     # 知識庫整合
+  human_like_responses: true           # 人性化回應
+  
+  # 整合版本信息
+  integration_version: "1.0.0"
+  last_updated: "2024-12-19"
+  features_enabled: [
+    "深度情感理解",
+    "語義增強檢索", 
+    "人性化提示詞生成",
+    "動態參數調整",
+    "親密度感知",
+    "智能風格匹配"
+  ]
