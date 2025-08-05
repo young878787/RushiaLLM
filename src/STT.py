@@ -22,6 +22,13 @@ except ImportError:
     REALTIME_STT_AVAILABLE = False
     print("⚠️  RealtimeSTT 未安裝，請運行: pip install RealtimeSTT")
 
+try:
+    import opencc
+    OPENCC_AVAILABLE = True
+except ImportError:
+    OPENCC_AVAILABLE = False
+    print("⚠️  OpenCC 未安裝，請運行: pip install opencc")
+
 # 支援的語言
 class STTLanguage(Enum):
     CHINESE_TRADITIONAL = "zh"  # Whisper 使用 zh 來處理中文（包含繁體和簡體）
@@ -83,6 +90,10 @@ class STTConfig:
     use_gpu: bool = True
     gpu_device_index: Optional[int] = 0  # RealtimeSTT 預設值
     
+    # 文字轉換配置
+    enable_opencc: bool = True  # 啟用 OpenCC 簡轉繁
+    opencc_config: str = "s2twp.json"  # OpenCC 配置文件
+    
     # 其他配置
     beam_size: int = 5
     initial_prompt: Optional[str] = None
@@ -124,6 +135,18 @@ class RealtimeSTTService:
         # 即時轉錄狀態
         self.realtime_transcription_enabled = self.config.enable_realtime_transcription
         self.realtime_text_buffer = ""
+        
+        # OpenCC 轉換器
+        self.opencc_converter = None
+        if self.config.enable_opencc and OPENCC_AVAILABLE:
+            try:
+                self.opencc_converter = opencc.OpenCC(self.config.opencc_config)
+                self.logger.info(f"✅ OpenCC 初始化成功，使用配置: {self.config.opencc_config}")
+            except Exception as e:
+                self.logger.error(f"OpenCC 初始化失敗: {e}")
+                self.opencc_converter = None
+        elif self.config.enable_opencc and not OPENCC_AVAILABLE:
+            self.logger.warning("OpenCC 已啟用但未安裝，請運行: pip install opencc")
         
         # 線程安全
         self._lock = threading.Lock()
@@ -181,6 +204,10 @@ class RealtimeSTTService:
         config_dict['use_gpu'] = stt_config.get('use_gpu', True)
         config_dict['gpu_device_index'] = stt_config.get('gpu_device_index', 0)  # RealtimeSTT 預設值
         
+        # OpenCC 配置
+        config_dict['enable_opencc'] = stt_config.get('enable_opencc', True)  # 預設啟用
+        config_dict['opencc_config'] = stt_config.get('opencc_config', 's2twp.json')  # 簡轉繁（台灣用詞）
+        
         # 喚醒詞配置
         wake_words = stt_config.get('wake_words', [])
         if wake_words:
@@ -236,6 +263,7 @@ class RealtimeSTTService:
             self.logger.info(f"   - 語言: {self.config.language.value}")
             self.logger.info(f"   - GPU: {'啟用' if self.config.use_gpu else '禁用'}")
             self.logger.info(f"   - 即時轉錄: {'啟用' if self.config.enable_realtime_transcription else '禁用'}")
+            self.logger.info(f"   - OpenCC 簡轉繁: {'啟用' if self.opencc_converter else '禁用'}")
             
             return True
             
@@ -328,9 +356,12 @@ class RealtimeSTTService:
                 self.stats["total_transcriptions"] += 1
                 self.stats["last_transcription"] = datetime.now()
             
+            # 應用 OpenCC 轉換（簡轉繁）
+            converted_text = self._convert_text_with_opencc(text)
+            
             # 創建轉錄結果
             result = TranscriptionResult(
-                text=text,
+                text=converted_text,
                 confidence=0.95,  # RealtimeSTT 通常不提供信心分數
                 language=self.config.language.value,
                 timestamp=datetime.now(),
@@ -338,7 +369,10 @@ class RealtimeSTTService:
                 is_final=True
             )
             
-            self.logger.info(f"📝 轉錄完成: {text}")
+            self.logger.info(f"📝 轉錄完成: {converted_text}")
+            if converted_text != text:
+                self.logger.debug(f"   原文: {text}")
+                self.logger.debug(f"   轉換後: {converted_text}")
             
             # 觸發回調
             self._trigger_transcription_callbacks(result)
@@ -350,9 +384,12 @@ class RealtimeSTTService:
     def _process_realtime_text(self, text: str):
         """處理即時轉錄文字"""
         try:
+            # 應用 OpenCC 轉換（簡轉繁）
+            converted_text = self._convert_text_with_opencc(text)
+            
             # 創建即時轉錄結果
             result = TranscriptionResult(
-                text=text,
+                text=converted_text,
                 confidence=0.8,  # 即時轉錄信心度較低
                 language=self.config.language.value,
                 timestamp=datetime.now(),
@@ -360,13 +397,25 @@ class RealtimeSTTService:
                 is_final=False  # 即時轉錄不是最終結果
             )
             
-            self.logger.debug(f"⚡ 即時轉錄: {text}")
+            self.logger.debug(f"⚡ 即時轉錄: {converted_text}")
             
             # 觸發回調（可能需要特殊處理即時結果）
             self._trigger_realtime_callbacks(result)
             
         except Exception as e:
             self.logger.error(f"處理即時轉錄失敗: {e}")
+    
+    def _convert_text_with_opencc(self, text: str) -> str:
+        """使用 OpenCC 轉換文字（簡轉繁）"""
+        if not self.opencc_converter or not text.strip():
+            return text
+        
+        try:
+            converted = self.opencc_converter.convert(text)
+            return converted
+        except Exception as e:
+            self.logger.error(f"OpenCC 轉換失敗: {e}")
+            return text  # 轉換失敗時返回原文
     
     # ==================== 事件回調 ====================
     
@@ -618,6 +667,9 @@ class RealtimeSTTService:
             "realtime_model_type": self.config.realtime_model_type,
             "use_gpu": self.config.use_gpu,
             "gpu_device_index": self.config.gpu_device_index,
+            "enable_opencc": self.config.enable_opencc,
+            "opencc_config": self.config.opencc_config,
+            "opencc_available": self.opencc_converter is not None,
             "wake_words": self.config.wake_words,
             "wake_words_sensitivity": self.config.wake_words_sensitivity if self.config.wake_words else None
         }
@@ -689,7 +741,9 @@ def test_stt_service():
                     'model': 'base',  # 使用 base 模型
                     'enable_realtime_transcription': False,  # 先關閉即時轉錄
                     'silero_sensitivity': 0.4,  # 使用預設值
-                    'use_gpu': True  # 使用 GPU 加速
+                    'use_gpu': True,  # 使用 GPU 加速
+                    'enable_opencc': True,  # 啟用 OpenCC 簡轉繁
+                    'opencc_config': 's2twp.json'  # 簡體轉繁體（台灣用詞）
                 }
             }
             
@@ -709,9 +763,12 @@ def test_stt_service():
             
             # 開始監聽
             print("開始語音監聽，請說話...")
+            print("提示：STT 服務會持續監聽，每次說話都會即時轉錄")
+            print("     測試將運行30秒後自動停止，實際使用時可以無限期運行")
+            print("     每次檢測到語音都會立即處理，不受時間限制")
             service.start_listening()
             
-            # 運行 30 秒
+            # 測試運行 30 秒（實際使用時可以無限期運行）
             await asyncio.sleep(30)
             
             # 停止並顯示統計
@@ -732,6 +789,90 @@ def test_stt_service():
     asyncio.run(main())
 
 
+def test_continuous_listening():
+    """演示持續監聽功能（適合實際使用）"""
+    import asyncio
+    
+    async def transcription_handler(result: TranscriptionResult):
+        print(f"🗣️  轉錄: {result.text}")
+        print(f"   時間: {result.timestamp.strftime('%H:%M:%S')}")
+        
+        # 可以在這裡加入自動響應邏輯
+        if "停止" in result.text or "結束" in result.text:
+            print("檢測到停止指令，準備結束...")
+            return "stop"  # 返回停止信號
+    
+    async def recording_handler(event_type: str, data: Dict):
+        if event_type == "recording_start":
+            print("🔴 開始錄音...")
+        elif event_type == "recording_stop":
+            print("⚫ 錄音結束，處理中...")
+    
+    async def error_handler(error: str):
+        print(f"❌ 錯誤: {error}")
+    
+    async def main():
+        print("持續監聽演示 - STT 服務整合示例")
+        print("=" * 60)
+        print("說 '停止' 或 '結束' 來終止程序")
+        print("=" * 60)
+        
+        try:
+            # 創建服務配置
+            config = {
+                'stt': {
+                    'language': 'zh-TW',
+                    'model': 'base',
+                    'enable_realtime_transcription': False,
+                    'silero_sensitivity': 0.4,
+                    'use_gpu': True,
+                    'enable_opencc': True,
+                    'opencc_config': 's2twp.json',
+                    'post_speech_silence_duration': 0.6,  # 調整靜音檢測時間
+                    'min_length_of_recording': 0.5
+                }
+            }
+            
+            service = await create_stt_service(config)
+            
+            # 註冊回調
+            service.add_transcription_callback(transcription_handler)
+            service.add_recording_callback(recording_handler)
+            service.add_error_callback(error_handler)
+            
+            # 開始持續監聽
+            service.start_listening()
+            
+            # 持續運行直到用戶說停止
+            print("\n🎤 開始持續監聽...")
+            try:
+                while service.is_listening:
+                    await asyncio.sleep(0.1)  # 檢查間隔
+            except KeyboardInterrupt:
+                print("\n收到中斷信號，正在停止...")
+            
+            # 停止服務
+            service.stop_listening()
+            
+            print("\n📊 最終統計:")
+            stats = service.get_stats()
+            print(f"   總錄音次數: {stats['total_recordings']}")
+            print(f"   總轉錄次數: {stats['total_transcriptions']}")
+            print(f"   運行時間: {stats.get('uptime_seconds', 0):.1f} 秒")
+            print(f"   錯誤次數: {stats['error_count']}")
+            
+            # 清理資源
+            service.cleanup()
+            
+        except Exception as e:
+            print(f"❌ 演示失敗: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # 運行演示
+    asyncio.run(main())
+
+
 if __name__ == "__main__":
     # 設置日誌
     logging.basicConfig(
@@ -741,8 +882,16 @@ if __name__ == "__main__":
     
     print("RealtimeSTT 服務測試")
     print("=" * 50)
+    print("1. test_stt_service() - 30秒限時測試")
+    print("2. test_continuous_listening() - 持續監聽演示")
+    print("=" * 50)
     
     if REALTIME_STT_AVAILABLE:
-        test_stt_service()
+        # 可以選擇運行哪個測試
+        import sys
+        if len(sys.argv) > 1 and sys.argv[1] == "continuous":
+            test_continuous_listening()
+        else:
+            test_stt_service()
     else:
         print("請先安裝 RealtimeSTT: pip install RealtimeSTT")

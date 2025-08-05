@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .llm_manager import LLMManager
 from .rag_system import RAGSystem
+from .STT import RealtimeSTTService, create_stt_service, TranscriptionResult
 from .utils.logger import setup_logger
 from .utils.system_optimizer import WindowsOptimizer
 from .filter.smart_line_break_filter import SmartLineBreakFilter
@@ -29,10 +30,15 @@ class VTuberCoreService:
         self.llm_manager: Optional[LLMManager] = None
         self.rag_system: Optional[RAGSystem] = None
         self.smart_line_break_filter: Optional[SmartLineBreakFilter] = None
+        self.stt_service: Optional[RealtimeSTTService] = None
         self.rag_enabled = True
         
         # 過濾器控制
         self.line_break_enabled = config.get('vtuber', {}).get('response', {}).get('enable_line_break', True)
+        
+        # STT 控制
+        self.stt_enabled = config.get('stt', {}).get('enabled', False)
+        self.auto_response_enabled = config.get('stt', {}).get('auto_response', False)  # 是否自動回應語音輸入
         
         # 人性化對話節奏控制
         response_config = config.get('vtuber', {}).get('response', {})
@@ -87,6 +93,10 @@ class VTuberCoreService:
             # 初始化智慧換行處理器
             self.smart_line_break_filter = SmartLineBreakFilter()
             
+            # 初始化 STT 服務（如果啟用）
+            if self.stt_enabled:
+                await self._initialize_stt_service()
+            
             self._initialized = True
             self.logger.info("✅ 核心服務初始化完成")
             return True
@@ -108,6 +118,59 @@ class VTuberCoreService:
                 self.logger.info(f"✅ 角色信息載入: {self.character_name}")
         except Exception as e:
             self.logger.warning(f"載入角色信息失敗，使用默認值: {e}")
+    
+    async def _initialize_stt_service(self):
+        """初始化 STT 服務"""
+        try:
+            self.logger.info("🎤 初始化 STT 語音識別服務...")
+            
+            # 創建 STT 服務
+            self.stt_service = await create_stt_service(self.config)
+            
+            # 註冊 STT 回調
+            if self.auto_response_enabled:
+                self.stt_service.add_transcription_callback(self._on_stt_transcription)
+            
+            self.stt_service.add_error_callback(self._on_stt_error)
+            
+            self.logger.info("✅ STT 服務初始化完成")
+            
+        except Exception as e:
+            self.logger.error(f"STT 服務初始化失敗: {e}")
+            self.stt_service = None
+            self.stt_enabled = False
+    
+    async def _on_stt_transcription(self, result: TranscriptionResult):
+        """STT 轉錄結果回調"""
+        try:
+            if not result.is_final or not result.text.strip():
+                return
+            
+            self.logger.info(f"🎤 收到語音輸入: {result.text}")
+            
+            # 如果啟用自動回應，生成AI回應
+            if self.auto_response_enabled:
+                # 使用系統用戶ID進行語音對話
+                stt_user_id = "stt_user"
+                
+                # 生成回應
+                response_data = await self.generate_response(
+                    user_id=stt_user_id,
+                    user_input=result.text,
+                    context={"source": "voice", "timestamp": result.timestamp.isoformat()}
+                )
+                
+                if response_data.get("success"):
+                    self.logger.info(f"🤖 語音回應: {response_data.get('response', '')}")
+                else:
+                    self.logger.error(f"語音回應生成失敗: {response_data.get('error', '未知錯誤')}")
+            
+        except Exception as e:
+            self.logger.error(f"處理STT轉錄結果失敗: {e}")
+    
+    def _on_stt_error(self, error_message: str):
+        """STT 錯誤回調"""
+        self.logger.error(f"STT 錯誤: {error_message}")
     
     async def generate_response(self, user_id: str, user_input: str, **kwargs) -> Dict[str, Any]:
         """生成AI回應 - 統一接口"""
@@ -417,6 +480,92 @@ class VTuberCoreService:
             "success": True
         }
     
+    # ==================== STT 語音識別控制 ====================
+    
+    async def toggle_stt(self, enabled: bool) -> Dict[str, Any]:
+        """切換STT語音識別狀態"""
+        try:
+            if enabled and not self.stt_service:
+                # 需要初始化STT服務
+                await self._initialize_stt_service()
+                if not self.stt_service:
+                    return {"error": "STT 服務初始化失敗", "success": False}
+            
+            self.stt_enabled = enabled
+            
+            if self.stt_service:
+                if enabled:
+                    success = self.stt_service.start_listening()
+                    if not success:
+                        return {"error": "STT 服務啟動失敗", "success": False}
+                else:
+                    success = self.stt_service.stop_listening()
+                    if not success:
+                        return {"error": "STT 服務停止失敗", "success": False}
+            
+            return {
+                "stt_enabled": self.stt_enabled,
+                "message": f"語音識別已{'啟用' if enabled else '禁用'}",
+                "success": True
+            }
+        except Exception as e:
+            return {"error": str(e), "success": False}
+    
+    def toggle_auto_response(self, enabled: bool) -> Dict[str, Any]:
+        """切換語音自動回應狀態"""
+        self.auto_response_enabled = enabled
+        return {
+            "auto_response_enabled": self.auto_response_enabled,
+            "message": f"語音自動回應已{'啟用' if enabled else '禁用'}",
+            "success": True
+        }
+    
+    def get_stt_status(self) -> Dict[str, Any]:
+        """獲取STT狀態"""
+        try:
+            if not self.stt_service:
+                return {
+                    "stt_available": False,
+                    "stt_enabled": False,
+                    "is_listening": False,
+                    "auto_response_enabled": self.auto_response_enabled,
+                    "message": "STT 服務未初始化",
+                    "success": True
+                }
+            
+            stats = self.stt_service.get_stats()
+            config_info = self.stt_service.get_config_info()
+            
+            return {
+                "stt_available": True,
+                "stt_enabled": self.stt_enabled,
+                "is_listening": stats.get("is_listening", False),
+                "auto_response_enabled": self.auto_response_enabled,
+                "stats": stats,
+                "config": config_info,
+                "success": True
+            }
+        except Exception as e:
+            return {"error": str(e), "success": False}
+    
+    def update_stt_sensitivity(self, silero_sensitivity: float = None, webrtc_sensitivity: int = None) -> Dict[str, Any]:
+        """更新STT語音檢測靈敏度"""
+        try:
+            if not self.stt_service:
+                return {"error": "STT 服務未初始化", "success": False}
+            
+            success = self.stt_service.update_sensitivity(
+                silero_sensitivity=silero_sensitivity,
+                webrtc_sensitivity=webrtc_sensitivity
+            )
+            
+            return {
+                "success": success,
+                "message": "STT 靈敏度已更新" if success else "STT 靈敏度更新失敗"
+            }
+        except Exception as e:
+            return {"error": str(e), "success": False}
+    
     def toggle_typing_simulation(self, enabled: bool) -> Dict[str, Any]:
         """切換打字模擬狀態"""
         self.typing_simulation_enabled = enabled
@@ -518,6 +667,11 @@ class VTuberCoreService:
             if self.smart_line_break_filter:
                 line_break_stats = self.smart_line_break_filter.get_stats()
             
+            # 獲取STT統計
+            stt_stats = {}
+            if self.stt_service:
+                stt_stats = self.stt_service.get_stats()
+            
             return {
                 "total_documents": rag_stats['total_documents'],
                 "collection_name": rag_stats['collection_name'],
@@ -531,6 +685,10 @@ class VTuberCoreService:
                     "min_delay": self.typing_min_delay,
                     "max_delay": self.typing_max_delay
                 },
+                "stt_enabled": self.stt_enabled,
+                "stt_available": self.stt_service is not None,
+                "stt_stats": stt_stats,
+                "auto_response_enabled": self.auto_response_enabled,
                 "active_users": len(self.user_sessions),
                 "character_name": self.character_name,
                 "character_personality": self.character_personality,
@@ -645,6 +803,10 @@ class VTuberCoreService:
             if self.smart_line_break_filter:
                 # 智慧換行處理器通常不需要特殊清理
                 pass
+            
+            if self.stt_service:
+                self.stt_service.cleanup()
+                self.stt_service = None
             
             self.user_sessions.clear()
             self._initialized = False
