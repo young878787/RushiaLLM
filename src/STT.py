@@ -1,0 +1,659 @@
+#!/usr/bin/env python3
+"""
+實時語音轉文字服務 (RealtimeSTT)
+基於 GitHub 上的 RealtimeSTT 庫實現即時語音轉錄
+支援多種語言和自訂配置
+"""
+import asyncio
+import logging
+import threading
+import time
+from typing import Dict, List, Optional, Callable, Any, AsyncGenerator
+from datetime import datetime
+from dataclasses import dataclass
+from enum import Enum
+import queue
+import json
+
+try:
+    from RealtimeSTT import AudioToTextRecorder
+    REALTIME_STT_AVAILABLE = True
+except ImportError:
+    REALTIME_STT_AVAILABLE = False
+    print("⚠️  RealtimeSTT 未安裝，請運行: pip install RealtimeSTT")
+
+# 支援的語言
+class STTLanguage(Enum):
+    CHINESE_TRADITIONAL = "zh-TW"
+    CHINESE_SIMPLIFIED = "zh-CN" 
+    ENGLISH = "en"
+    JAPANESE = "ja"
+    KOREAN = "ko"
+
+# STT 引擎類型
+class STTEngine(Enum):
+    WHISPER_TINY = "tiny"
+    WHISPER_BASE = "base"
+    WHISPER_SMALL = "small"
+    WHISPER_MEDIUM = "medium"
+    WHISPER_LARGE = "large"
+    WHISPER_LARGE_V2 = "large-v2"
+    WHISPER_LARGE_V3 = "large-v3"
+
+@dataclass
+class TranscriptionResult:
+    """轉錄結果數據類"""
+    text: str
+    confidence: float
+    language: str
+    timestamp: datetime
+    audio_duration: float
+    is_final: bool = True
+    words: List[Dict] = None
+
+@dataclass 
+class STTConfig:
+    """STT 配置類"""
+    # 基本配置
+    language: STTLanguage = STTLanguage.CHINESE_TRADITIONAL
+    model: STTEngine = STTEngine.WHISPER_BASE
+    
+    # 音頻配置
+    sample_rate: int = 16000
+    chunk_size: int = 1024
+    
+    # 即時處理配置
+    wake_words: List[str] = None  # 喚醒詞
+    wake_words_sensitivity: float = 0.6
+    
+    # 語音檢測配置
+    silero_sensitivity: float = 0.4  # 語音活動檢測靈敏度 (RealtimeSTT 預設值)
+    webrtc_sensitivity: int = 3  # WebRTC VAD 靈敏度 (0-3)
+    post_speech_silence_duration: float = 0.6  # 語音後靜音時長 (RealtimeSTT 預設值)
+    min_length_of_recording: float = 0.5  # 最短錄音時長 (RealtimeSTT 預設值)
+    min_gap_between_recordings: float = 0.0  # 錄音間最短間隔
+    
+    # 即時轉錄配置  
+    enable_realtime_transcription: bool = False  # 啟用即時轉錄 (預設關閉以避免複雜性)
+    realtime_processing_pause: float = 0.2  # 即時處理間隔 (RealtimeSTT 預設值)
+    realtime_model_type: str = "tiny"  # 即時轉錄模型
+    
+    # GPU 配置
+    use_gpu: bool = True
+    gpu_device_index: Optional[int] = 0  # RealtimeSTT 預設值
+    
+    # 其他配置
+    beam_size: int = 5
+    initial_prompt: Optional[str] = None
+
+
+class RealtimeSTTService:
+    """基於 RealtimeSTT 的即時語音轉文字服務"""
+    
+    def __init__(self, config: Dict[str, Any] = None):
+        self.logger = logging.getLogger(__name__)
+        
+        # 檢查依賴
+        if not REALTIME_STT_AVAILABLE:
+            raise ImportError("RealtimeSTT 庫未安裝，請先安裝: pip install RealtimeSTT")
+        
+        # 載入配置
+        self.config = self._load_config(config or {})
+        
+        # 核心組件
+        self.recorder: Optional[AudioToTextRecorder] = None
+        self.is_listening = False
+        self.is_initialized = False
+        
+        # 事件回調
+        self.transcription_callbacks: List[Callable] = []
+        self.recording_callbacks: List[Callable] = []
+        self.error_callbacks: List[Callable] = []
+        
+        # 統計資料
+        self.stats = {
+            "total_recordings": 0,
+            "total_transcriptions": 0,
+            "total_audio_duration": 0.0,
+            "start_time": None,
+            "last_transcription": None,
+            "error_count": 0
+        }
+        
+        # 即時轉錄狀態
+        self.realtime_transcription_enabled = self.config.enable_realtime_transcription
+        self.realtime_text_buffer = ""
+        
+        # 線程安全
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+    
+    def _load_config(self, user_config: Dict[str, Any]) -> STTConfig:
+        """載入和驗證配置"""
+        config_dict = {}
+        
+        # 從用戶配置中提取 STT 相關設定
+        stt_config = user_config.get('stt', {})
+        
+        # 語言設定
+        language_str = stt_config.get('language', 'zh-TW')
+        try:
+            config_dict['language'] = STTLanguage(language_str)
+        except ValueError:
+            self.logger.warning(f"不支援的語言: {language_str}，使用預設值")
+            config_dict['language'] = STTLanguage.CHINESE_TRADITIONAL
+        
+        # 模型設定
+        model_str = stt_config.get('model', 'base')
+        try:
+            config_dict['model'] = STTEngine(model_str)
+        except ValueError:
+            self.logger.warning(f"不支援的模型: {model_str}，使用預設值")
+            config_dict['model'] = STTEngine.WHISPER_BASE
+        
+        # 音頻配置
+        config_dict['sample_rate'] = stt_config.get('sample_rate', 16000)
+        config_dict['chunk_size'] = stt_config.get('chunk_size', 1024)
+        
+        # 語音檢測配置
+        config_dict['silero_sensitivity'] = stt_config.get('silero_sensitivity', 0.4)  # RealtimeSTT 預設值
+        config_dict['webrtc_sensitivity'] = stt_config.get('webrtc_sensitivity', 3)
+        config_dict['post_speech_silence_duration'] = stt_config.get('post_speech_silence_duration', 0.6)  # RealtimeSTT 預設值
+        config_dict['min_length_of_recording'] = stt_config.get('min_length_of_recording', 0.5)  # RealtimeSTT 預設值
+        
+        # 即時轉錄配置
+        config_dict['enable_realtime_transcription'] = stt_config.get('enable_realtime_transcription', False)  # 預設關閉
+        config_dict['realtime_processing_pause'] = stt_config.get('realtime_processing_pause', 0.2)  # RealtimeSTT 預設值
+        config_dict['realtime_model_type'] = stt_config.get('realtime_model_type', 'tiny')
+        
+        # GPU 配置
+        config_dict['use_gpu'] = stt_config.get('use_gpu', True)
+        config_dict['gpu_device_index'] = stt_config.get('gpu_device_index', 0)  # RealtimeSTT 預設值
+        
+        # 喚醒詞配置
+        wake_words = stt_config.get('wake_words', [])
+        if wake_words:
+            config_dict['wake_words'] = wake_words
+            config_dict['wake_words_sensitivity'] = stt_config.get('wake_words_sensitivity', 0.6)
+        
+        return STTConfig(**config_dict)
+    
+    async def initialize(self) -> bool:
+        """初始化 STT 服務"""
+        try:
+            self.logger.info("🎤 初始化 RealtimeSTT 服務...")
+            
+            # 準備 RealtimeSTT 配置
+            recorder_config = {
+                "model": self.config.model.value,
+                "language": self.config.language.value,
+                "silero_sensitivity": self.config.silero_sensitivity,
+                "webrtc_sensitivity": self.config.webrtc_sensitivity,
+                "post_speech_silence_duration": self.config.post_speech_silence_duration,
+                "min_length_of_recording": self.config.min_length_of_recording,
+                "min_gap_between_recordings": self.config.min_gap_between_recordings,
+                "enable_realtime_transcription": self.config.enable_realtime_transcription,
+                "realtime_processing_pause": self.config.realtime_processing_pause,
+                "realtime_model_type": self.config.realtime_model_type,
+                "on_recording_start": self._on_recording_start,
+                "on_recording_stop": self._on_recording_stop,
+                "on_transcription_start": self._on_transcription_start,
+                "beam_size": self.config.beam_size,
+                "sample_rate": self.config.sample_rate,
+                "device": "cuda" if self.config.use_gpu else "cpu"
+            }
+            
+            # 可選配置
+            if self.config.gpu_device_index is not None:
+                recorder_config["gpu_device_index"] = self.config.gpu_device_index
+            
+            if self.config.initial_prompt:
+                recorder_config["initial_prompt"] = self.config.initial_prompt
+            
+            if self.config.wake_words:
+                recorder_config["wake_words"] = " ".join(self.config.wake_words)  # RealtimeSTT 期望字符串而非列表
+                recorder_config["wake_words_sensitivity"] = self.config.wake_words_sensitivity
+            
+            # 創建 AudioToTextRecorder
+            self.recorder = AudioToTextRecorder(**recorder_config)
+            
+            self.is_initialized = True
+            self.stats["start_time"] = datetime.now()
+            
+            self.logger.info(f"✅ RealtimeSTT 初始化完成")
+            self.logger.info(f"   - 模型: {self.config.model.value}")
+            self.logger.info(f"   - 語言: {self.config.language.value}")
+            self.logger.info(f"   - GPU: {'啟用' if self.config.use_gpu else '禁用'}")
+            self.logger.info(f"   - 即時轉錄: {'啟用' if self.config.enable_realtime_transcription else '禁用'}")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"RealtimeSTT 初始化失敗: {e}")
+            return False
+    
+    def start_listening(self) -> bool:
+        """開始語音監聽"""
+        if not self.is_initialized:
+            self.logger.error("STT 服務未初始化")
+            return False
+        
+        if self.is_listening:
+            self.logger.warning("STT 服務已在監聽中")
+            return True
+        
+        try:
+            self.is_listening = True
+            self._stop_event.clear()
+            
+            # 啟動監聽線程
+            self.listening_thread = threading.Thread(target=self._listening_loop, daemon=True)
+            self.listening_thread.start()
+            
+            self.logger.info("🎤 開始語音監聽...")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"啟動語音監聽失敗: {e}")
+            self.is_listening = False
+            return False
+    
+    def stop_listening(self) -> bool:
+        """停止語音監聽"""
+        try:
+            if not self.is_listening:
+                return True
+            
+            self.is_listening = False
+            self._stop_event.set()
+            
+            # 停止錄音器
+            if self.recorder:
+                try:
+                    self.recorder.shutdown()
+                except:
+                    pass
+            
+            self.logger.info("🔇 語音監聽已停止")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"停止語音監聽失敗: {e}")
+            return False
+    
+    def _listening_loop(self):
+        """主要監聽循環"""
+        self.logger.info("STT 監聽循環啟動")
+        
+        try:
+            while self.is_listening and not self._stop_event.is_set():
+                # 等待並獲取轉錄結果
+                transcription = self.recorder.text()
+                
+                if transcription and transcription.strip():
+                    # 處理轉錄結果
+                    self._process_transcription(transcription.strip())
+                
+                # 檢查即時轉錄
+                if self.realtime_transcription_enabled:
+                    realtime_text = getattr(self.recorder, 'realtime_text', '')
+                    if realtime_text and realtime_text != self.realtime_text_buffer:
+                        self._process_realtime_text(realtime_text)
+                        self.realtime_text_buffer = realtime_text
+                
+                # 短暫休息避免過度占用 CPU
+                time.sleep(0.01)
+                
+        except Exception as e:
+            self.logger.error(f"監聽循環錯誤: {e}")
+            self._trigger_error_callbacks(str(e))
+        finally:
+            self.logger.info("STT 監聽循環結束")
+    
+    def _process_transcription(self, text: str):
+        """處理完整轉錄結果"""
+        try:
+            with self._lock:
+                self.stats["total_transcriptions"] += 1
+                self.stats["last_transcription"] = datetime.now()
+            
+            # 創建轉錄結果
+            result = TranscriptionResult(
+                text=text,
+                confidence=0.95,  # RealtimeSTT 通常不提供信心分數
+                language=self.config.language.value,
+                timestamp=datetime.now(),
+                audio_duration=0.0,  # 需要從錄音器獲取
+                is_final=True
+            )
+            
+            self.logger.info(f"📝 轉錄完成: {text}")
+            
+            # 觸發回調
+            self._trigger_transcription_callbacks(result)
+            
+        except Exception as e:
+            self.logger.error(f"處理轉錄結果失敗: {e}")
+            self._trigger_error_callbacks(str(e))
+    
+    def _process_realtime_text(self, text: str):
+        """處理即時轉錄文字"""
+        try:
+            # 創建即時轉錄結果
+            result = TranscriptionResult(
+                text=text,
+                confidence=0.8,  # 即時轉錄信心度較低
+                language=self.config.language.value,
+                timestamp=datetime.now(),
+                audio_duration=0.0,
+                is_final=False  # 即時轉錄不是最終結果
+            )
+            
+            self.logger.debug(f"⚡ 即時轉錄: {text}")
+            
+            # 觸發回調（可能需要特殊處理即時結果）
+            self._trigger_realtime_callbacks(result)
+            
+        except Exception as e:
+            self.logger.error(f"處理即時轉錄失敗: {e}")
+    
+    # ==================== 事件回調 ====================
+    
+    def _on_recording_start(self):
+        """錄音開始回調"""
+        with self._lock:
+            self.stats["total_recordings"] += 1
+        
+        self.logger.debug("🔴 開始錄音")
+        self._trigger_recording_callbacks("recording_start", {"timestamp": datetime.now()})
+    
+    def _on_recording_stop(self):
+        """錄音停止回調"""
+        self.logger.debug("⚫ 停止錄音")
+        self._trigger_recording_callbacks("recording_stop", {"timestamp": datetime.now()})
+    
+    def _on_transcription_start(self):
+        """轉錄開始回調"""
+        self.logger.debug("📝 開始轉錄")
+        self._trigger_recording_callbacks("transcription_start", {"timestamp": datetime.now()})
+    
+    def _trigger_transcription_callbacks(self, result: TranscriptionResult):
+        """觸發轉錄回調"""
+        for callback in self.transcription_callbacks:
+            try:
+                if asyncio.iscoroutinefunction(callback):
+                    asyncio.create_task(callback(result))
+                else:
+                    callback(result)
+            except Exception as e:
+                self.logger.error(f"轉錄回調執行失敗: {e}")
+    
+    def _trigger_realtime_callbacks(self, result: TranscriptionResult):
+        """觸發即時轉錄回調"""
+        # 可以有專門的即時轉錄回調，或者復用轉錄回調
+        self._trigger_transcription_callbacks(result)
+    
+    def _trigger_recording_callbacks(self, event_type: str, data: Dict):
+        """觸發錄音事件回調"""
+        for callback in self.recording_callbacks:
+            try:
+                if asyncio.iscoroutinefunction(callback):
+                    asyncio.create_task(callback(event_type, data))
+                else:
+                    callback(event_type, data)
+            except Exception as e:
+                self.logger.error(f"錄音回調執行失敗: {e}")
+    
+    def _trigger_error_callbacks(self, error_message: str):
+        """觸發錯誤回調"""
+        with self._lock:
+            self.stats["error_count"] += 1
+        
+        for callback in self.error_callbacks:
+            try:
+                if asyncio.iscoroutinefunction(callback):
+                    asyncio.create_task(callback(error_message))
+                else:
+                    callback(error_message)
+            except Exception as e:
+                self.logger.error(f"錯誤回調執行失敗: {e}")
+    
+    # ==================== 回調註冊 ====================
+    
+    def add_transcription_callback(self, callback: Callable[[TranscriptionResult], None]):
+        """添加轉錄結果回調"""
+        self.transcription_callbacks.append(callback)
+    
+    def add_recording_callback(self, callback: Callable[[str, Dict], None]):
+        """添加錄音事件回調"""
+        self.recording_callbacks.append(callback)
+    
+    def add_error_callback(self, callback: Callable[[str], None]):
+        """添加錯誤回調"""
+        self.error_callbacks.append(callback)
+    
+    def remove_transcription_callback(self, callback: Callable):
+        """移除轉錄回調"""
+        if callback in self.transcription_callbacks:
+            self.transcription_callbacks.remove(callback)
+    
+    def remove_recording_callback(self, callback: Callable):
+        """移除錄音回調"""
+        if callback in self.recording_callbacks:
+            self.recording_callbacks.remove(callback)
+    
+    def remove_error_callback(self, callback: Callable):
+        """移除錯誤回調"""
+        if callback in self.error_callbacks:
+            self.error_callbacks.remove(callback)
+    
+    # ==================== 配置管理 ====================
+    
+    def update_sensitivity(self, silero_sensitivity: float = None, webrtc_sensitivity: int = None) -> bool:
+        """更新語音檢測靈敏度"""
+        try:
+            if not self.recorder:
+                return False
+            
+            if silero_sensitivity is not None:
+                self.config.silero_sensitivity = silero_sensitivity
+                # RealtimeSTT 可能需要重新初始化才能應用新設定
+            
+            if webrtc_sensitivity is not None:
+                self.config.webrtc_sensitivity = webrtc_sensitivity
+            
+            self.logger.info(f"更新靈敏度設定: Silero={self.config.silero_sensitivity}, WebRTC={self.config.webrtc_sensitivity}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"更新靈敏度失敗: {e}")
+            return False
+    
+    def update_language(self, language: STTLanguage) -> bool:
+        """更新語言設定（需要重新初始化）"""
+        try:
+            self.config.language = language
+            self.logger.info(f"語言設定已更新為: {language.value}")
+            return True
+        except Exception as e:
+            self.logger.error(f"更新語言設定失敗: {e}")
+            return False
+    
+    def toggle_realtime_transcription(self, enabled: bool) -> bool:
+        """切換即時轉錄功能"""
+        try:
+            self.realtime_transcription_enabled = enabled
+            self.config.enable_realtime_transcription = enabled
+            self.logger.info(f"即時轉錄已{'啟用' if enabled else '禁用'}")
+            return True
+        except Exception as e:
+            self.logger.error(f"切換即時轉錄失敗: {e}")
+            return False
+    
+    # ==================== 狀態查詢 ====================
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """獲取統計資料"""
+        with self._lock:
+            stats = self.stats.copy()
+        
+        if stats["start_time"]:
+            stats["uptime_seconds"] = (datetime.now() - stats["start_time"]).total_seconds()
+        
+        stats.update({
+            "is_listening": self.is_listening,
+            "is_initialized": self.is_initialized,
+            "realtime_transcription_enabled": self.realtime_transcription_enabled,
+            "current_language": self.config.language.value,
+            "current_model": self.config.model.value,
+            "callback_counts": {
+                "transcription": len(self.transcription_callbacks),
+                "recording": len(self.recording_callbacks),
+                "error": len(self.error_callbacks)
+            }
+        })
+        
+        return stats
+    
+    def get_config_info(self) -> Dict[str, Any]:
+        """獲取配置資訊"""
+        return {
+            "language": self.config.language.value,
+            "model": self.config.model.value,
+            "sample_rate": self.config.sample_rate,
+            "silero_sensitivity": self.config.silero_sensitivity,
+            "webrtc_sensitivity": self.config.webrtc_sensitivity,
+            "post_speech_silence_duration": self.config.post_speech_silence_duration,
+            "min_length_of_recording": self.config.min_length_of_recording,
+            "enable_realtime_transcription": self.config.enable_realtime_transcription,
+            "realtime_model_type": self.config.realtime_model_type,
+            "use_gpu": self.config.use_gpu,
+            "gpu_device_index": self.config.gpu_device_index,
+            "wake_words": self.config.wake_words,
+            "wake_words_sensitivity": self.config.wake_words_sensitivity if self.config.wake_words else None
+        }
+    
+    def is_ready(self) -> bool:
+        """檢查服務是否就緒"""
+        return self.is_initialized and REALTIME_STT_AVAILABLE
+    
+    # ==================== 清理資源 ====================
+    
+    def cleanup(self):
+        """清理資源"""
+        try:
+            self.stop_listening()
+            
+            if self.recorder:
+                try:
+                    self.recorder.shutdown()
+                except:
+                    pass
+                self.recorder = None
+            
+            # 清理回調
+            self.transcription_callbacks.clear()
+            self.recording_callbacks.clear()
+            self.error_callbacks.clear()
+            
+            self.is_initialized = False
+            self.logger.info("✅ STT 服務資源清理完成")
+            
+        except Exception as e:
+            self.logger.error(f"STT 服務清理失敗: {e}")
+
+
+# ==================== 便利函數 ====================
+
+async def create_stt_service(config: Dict[str, Any] = None) -> RealtimeSTTService:
+    """創建並初始化 STT 服務的便利函數"""
+    service = RealtimeSTTService(config)
+    success = await service.initialize()
+    
+    if not success:
+        raise RuntimeError("STT 服務初始化失敗")
+    
+    return service
+
+def test_stt_service():
+    """測試 STT 服務的基本功能"""
+    import asyncio
+    
+    async def transcription_handler(result: TranscriptionResult):
+        print(f"轉錄結果: {result.text}")
+        print(f"語言: {result.language}, 信心度: {result.confidence:.2f}")
+        print(f"時間: {result.timestamp.strftime('%H:%M:%S')}")
+        print("-" * 50)
+    
+    async def recording_handler(event_type: str, data: Dict):
+        print(f"錄音事件: {event_type} at {data['timestamp'].strftime('%H:%M:%S')}")
+    
+    async def error_handler(error: str):
+        print(f"錯誤: {error}")
+    
+    async def main():
+        try:
+            # 創建服務
+            config = {
+                'stt': {
+                    'language': 'zh-TW',
+                    'model': 'tiny',  # 使用較小的模型進行測試
+                    'enable_realtime_transcription': False,  # 先關閉即時轉錄
+                    'silero_sensitivity': 0.4,  # 使用預設值
+                    'use_gpu': False  # 先使用 CPU 避免 GPU 相關問題
+                }
+            }
+            
+            service = await create_stt_service(config)
+            
+            # 註冊回調
+            service.add_transcription_callback(transcription_handler)
+            service.add_recording_callback(recording_handler)
+            service.add_error_callback(error_handler)
+            
+            # 顯示配置
+            print("STT 服務配置:")
+            config_info = service.get_config_info()
+            for key, value in config_info.items():
+                print(f"  {key}: {value}")
+            print("-" * 50)
+            
+            # 開始監聽
+            print("開始語音監聽，請說話...")
+            service.start_listening()
+            
+            # 運行 30 秒
+            await asyncio.sleep(30)
+            
+            # 停止並顯示統計
+            service.stop_listening()
+            
+            print("\n統計資料:")
+            stats = service.get_stats()
+            for key, value in stats.items():
+                print(f"  {key}: {value}")
+            
+            # 清理
+            service.cleanup()
+            
+        except Exception as e:
+            print(f"測試失敗: {e}")
+    
+    # 運行測試
+    asyncio.run(main())
+
+
+if __name__ == "__main__":
+    # 設置日誌
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    print("RealtimeSTT 服務測試")
+    print("=" * 50)
+    
+    if REALTIME_STT_AVAILABLE:
+        test_stt_service()
+    else:
+        print("請先安裝 RealtimeSTT: pip install RealtimeSTT")
