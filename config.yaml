@@ -90,6 +90,38 @@ vtuber:
       appropriate_boundaries: true    # 適當邊界
       natural_affection: true         # 自然情感表達
 
+# STT 語音識別配置
+stt:
+  enabled: true                        # 啟用 STT 語音識別
+  auto_response: false                 # 自動回應語音輸入（false表示僅預覽，需手動發送）
+  
+  # 語音轉文字配置 - 修正為STT.py期望的格式
+  language: "zh-TW"                    # 識別語言：zh-TW, zh-CN, zh, en, ja, ko
+  model: "base"                        # 語音識別模型：tiny, base, small, medium, large
+  
+  # 語音檢測配置
+  silero_sensitivity: 0.4              # Silero VAD 靈敏度 (0.1-1.0) - RealtimeSTT預設
+  webrtc_sensitivity: 3                # WebRTC VAD 靈敏度 (0-3) - RealtimeSTT預設
+  post_speech_silence_duration: 0.6    # 語音結束後靜音時長（秒）
+  min_length_of_recording: 0.5         # 最短錄音時長（秒）
+  
+  # GPU配置
+  use_gpu: true                        # 使用GPU加速
+  gpu_device_index: 0                  # GPU設備索引
+  
+  # 即時轉錄配置
+  enable_realtime_transcription: false # 啟用即時轉錄（先關閉避免複雜性）
+  realtime_processing_pause: 0.2       # 即時處理間隔（秒）
+  realtime_model_type: "tiny"          # 即時轉錄模型
+  
+  # OpenCC簡轉繁配置
+  enable_opencc: true                  # 啟用OpenCC轉換
+  opencc_config: "s2twp.json"          # 簡體轉繁體（台灣用詞）
+  
+  # 其他配置
+  sample_rate: 16000                   # 採樣率
+  beam_size: 5                         # 束搜索大小
+
 # 語義分析與情感理解配置
 semantic_analysis:
   enabled: true

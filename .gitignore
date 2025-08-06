@@ -4,3 +4,4 @@ logs
 .env
 install_stt_requirements.py
 knowledge_expansion_plan.md
+realtimesst.log

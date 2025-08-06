@@ -10,11 +10,13 @@ from .gui_utils import MessageUtils
 class ChatPanel:
     """聊天面板組件"""
     
-    def __init__(self, parent, fonts, on_send_callback: Callable, on_clear_callback: Callable):
+    def __init__(self, parent, fonts, on_send_callback: Callable, on_clear_callback: Callable, 
+                 on_voice_toggle_callback: Callable = None):
         self.parent = parent
         self.fonts = fonts
         self.on_send_callback = on_send_callback
         self.on_clear_callback = on_clear_callback
+        self.on_voice_toggle_callback = on_voice_toggle_callback
         
         # 消息列表
         self.chat_messages: List = []
@@ -22,6 +24,11 @@ class ChatPanel:
         self.thinking_message_widget = None
         self.current_content_textbox = None
         self.current_typing_indicator = None
+        
+        # 語音相關狀態
+        self.is_voice_listening = False
+        self.voice_preview_text = ""
+        self.voice_status_label = None
         
         self.setup_ui()
     
@@ -48,6 +55,20 @@ class ChatPanel:
     
     def _create_input_area(self):
         """創建輸入區域"""
+        # 語音狀態顯示區域
+        self.voice_status_frame = ctk.CTkFrame(self.chat_container, height=35, corner_radius=8)
+        self.voice_status_frame.pack(fill="x", padx=10, pady=(0, 5))
+        self.voice_status_frame.pack_propagate(False)
+        
+        self.voice_status_label = ctk.CTkLabel(
+            self.voice_status_frame,
+            text="🎤 語音功能就緒",
+            font=self.fonts['body'],
+            text_color="gray"
+        )
+        self.voice_status_label.pack(pady=8)
+        
+        # 輸入框架
         input_frame = ctk.CTkFrame(self.chat_container, height=120, corner_radius=10)
         input_frame.pack(fill="x", padx=10, pady=(0, 10))
         input_frame.pack_propagate(False)
@@ -62,13 +83,31 @@ class ChatPanel:
         )
         self.message_input.pack(side="left", fill="both", expand=True, padx=(15, 10), pady=15)
         
-        # 按鈕區域
-        button_frame = ctk.CTkFrame(input_frame, width=100, fg_color="transparent")
+        # 按鈕區域 - 增加寬度以容納語音按鈕
+        button_frame = ctk.CTkFrame(input_frame, width=140, fg_color="transparent")
         button_frame.pack(side="right", fill="y", padx=(0, 15), pady=15)
         button_frame.pack_propagate(False)
         
-        self.send_button = ctk.CTkButton(
+        # 語音按鈕
+        self.voice_button = ctk.CTkButton(
             button_frame,
+            text="🎤",
+            command=self._on_voice_toggle,
+            font=self.fonts['body_bold'],
+            height=35,
+            width=60,
+            fg_color="#2E7D32",  # 綠色表示可用
+            hover_color="#1B5E20"
+        )
+        self.voice_button.pack(side="left", padx=(0, 5))
+        
+        # 右側按鈕容器
+        right_buttons = ctk.CTkFrame(button_frame, width=70, fg_color="transparent")
+        right_buttons.pack(side="right", fill="y")
+        right_buttons.pack_propagate(False)
+        
+        self.send_button = ctk.CTkButton(
+            right_buttons,
             text="發送",
             command=self._on_send,
             font=self.fonts['body_bold'],
@@ -77,7 +116,7 @@ class ChatPanel:
         self.send_button.pack(fill="x", pady=(0, 5))
         
         self.clear_chat_button = ctk.CTkButton(
-            button_frame,
+            right_buttons,
             text="清空",
             command=self._on_clear,
             font=self.fonts['body'],
@@ -340,3 +379,82 @@ class ChatPanel:
         """設置發送按鈕狀態"""
         state = "normal" if enabled else "disabled"
         self.send_button.configure(state=state, text=text)
+    
+    # ==================== 語音相關方法 ====================
+    
+    def _on_voice_toggle(self):
+        """語音按鈕切換處理"""
+        if self.on_voice_toggle_callback:
+            self.on_voice_toggle_callback()
+    
+    def update_voice_status(self, is_listening: bool, status_text: str = ""):
+        """更新語音狀態顯示"""
+        self.is_voice_listening = is_listening
+        
+        if is_listening:
+            self.voice_button.configure(
+                text="🔴",
+                fg_color="#D32F2F",  # 紅色表示正在錄音
+                hover_color="#B71C1C"
+            )
+            status = status_text or "🎤 正在聆聽..."
+            color = "#2E7D32"
+        else:
+            self.voice_button.configure(
+                text="🎤",
+                fg_color="#2E7D32",  # 綠色表示可用
+                hover_color="#1B5E20"
+            )
+            status = status_text or "🎤 語音功能就緒"
+            color = "gray"
+        
+        self.voice_status_label.configure(text=status, text_color=color)
+    
+    def update_voice_preview(self, text: str, is_final: bool = False):
+        """更新語音預覽文本"""
+        if not text.strip():
+            return
+            
+        self.voice_preview_text = text
+        
+        # 在輸入框中顯示預覽
+        current_content = self.message_input.get("1.0", "end-1c")
+        
+        if is_final:
+            # 最終結果，替換輸入框內容
+            self.message_input.delete("1.0", "end")
+            self.message_input.insert("1.0", text)
+            self.voice_status_label.configure(
+                text="✅ 語音識別完成，可編輯後發送",
+                text_color="#2E7D32"
+            )
+        else:
+            # 實時預覽，使用不同的顯示方式
+            preview_text = f"[預覽] {text}"
+            if not current_content.startswith("[預覽]"):
+                self.message_input.delete("1.0", "end")
+                self.message_input.insert("1.0", preview_text)
+            else:
+                self.message_input.delete("1.0", "end")
+                self.message_input.insert("1.0", preview_text)
+            
+            self.voice_status_label.configure(
+                text="🎤 正在識別語音...",
+                text_color="#1976D2"
+            )
+    
+    def clear_voice_preview(self):
+        """清除語音預覽"""
+        self.voice_preview_text = ""
+        current_content = self.message_input.get("1.0", "end-1c")
+        if current_content.startswith("[預覽]"):
+            self.message_input.delete("1.0", "end")
+    
+    def set_voice_available(self, available: bool):
+        """設置語音功能可用性"""
+        if available:
+            self.voice_button.configure(state="normal")
+            self.update_voice_status(False, "🎤 語音功能就緒")
+        else:
+            self.voice_button.configure(state="disabled")
+            self.update_voice_status(False, "❌ 語音功能不可用")

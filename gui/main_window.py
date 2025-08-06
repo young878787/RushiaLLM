@@ -24,6 +24,10 @@ class VTuberCustomGUI:
         self.core_service = core_service
         self.current_user_id = "gui_user"
         
+        # 初始化logger
+        import logging
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
         # 創建主窗口 - 必須先創建根窗口
         self.root = ctk.CTk()
         self.root.title("VTuber AI 助手")
@@ -78,7 +82,8 @@ class VTuberCustomGUI:
             main_frame,
             self.font_manager.fonts,
             on_send_callback=self.send_message,
-            on_clear_callback=self.clear_chat
+            on_clear_callback=self.clear_chat,
+            on_voice_toggle_callback=self.toggle_voice_input
         )
         
         # 創建系統訊息面板
@@ -104,6 +109,9 @@ class VTuberCustomGUI:
         """獲取控制面板事件處理器"""
         return {
             'toggle_rag': self.toggle_rag,
+            'toggle_stt': self.toggle_stt,
+            'toggle_auto_response': self.toggle_auto_response,
+            'update_stt_sensitivity': self.update_stt_sensitivity,
             'toggle_typing': self.toggle_typing,
             'toggle_line_break': self.toggle_line_break,
             'toggle_traditional_chinese': self.toggle_traditional_chinese,
@@ -121,11 +129,17 @@ class VTuberCustomGUI:
     
     def post_init(self):
         """初始化完成後的設置"""
+        # 設置語音回調
+        self._setup_voice_callbacks()
+        
         # 顯示歡迎訊息
         self.show_welcome_messages()
         
         # 檢查服務狀態
         self.check_service_status()
+        
+        # 初始化語音功能狀態
+        self._initialize_voice_status()
         
         # 開始定期狀態檢查
         self.start_status_monitoring()
@@ -432,6 +446,309 @@ class VTuberCustomGUI:
                 self.system_panel.add_system_message("error", "簡繁轉換切換失敗", str(e))
         
         self.root.after(100, update_result)
+    
+    # ==================== STT 語音功能 ====================
+    
+    def toggle_stt(self):
+        """切換STT語音識別"""
+        enabled = self.control_panel.stt_switch.get()
+        
+        # 立即更新UI狀態
+        self.control_panel.update_stt_status("⏳ 正在切換語音識別...", "#1976D2")
+        self.chat_panel.update_voice_status(False, "⏳ 正在初始化語音功能...")
+        
+        future = self.async_helper.run_async_task(
+            self.event_handlers.handle_toggle_stt(enabled)
+        )
+        
+        def update_result():
+            try:
+                if not future.done():
+                    self.root.after(200, update_result)
+                    return
+                
+                result = future.result()
+                if result.get('success'):
+                    if enabled:
+                        self.control_panel.update_stt_status("✅ STT 已啟用", "#2E7D32")
+                        self.chat_panel.set_voice_available(True)
+                        self.system_panel.add_system_message("stt", "語音識別已啟用", "可以開始語音輸入")
+                    else:
+                        self.control_panel.update_stt_status("❌ STT 已禁用", "gray")
+                        self.chat_panel.set_voice_available(False)
+                        self.system_panel.add_system_message("stt", "語音識別已禁用", "")
+                    
+                    # 更新控制組件狀態
+                    self.control_panel.set_stt_controls_state(enabled)
+                else:
+                    error_msg = result.get('error', '未知錯誤')
+                    self.control_panel.update_stt_status(f"❌ STT 錯誤: {error_msg}", "#D32F2F")
+                    self.chat_panel.set_voice_available(False)
+                    self.system_panel.add_system_message("error", "STT切換失敗", error_msg)
+                    
+                    # 重置開關狀態
+                    if enabled:
+                        self.control_panel.stt_switch.deselect()
+                        
+            except Exception as e:
+                self.control_panel.update_stt_status(f"❌ 異常: {str(e)}", "#D32F2F")
+                self.chat_panel.set_voice_available(False)
+                self.system_panel.add_system_message("error", "STT操作異常", str(e))
+                if enabled:
+                    self.control_panel.stt_switch.deselect()
+        
+        self.root.after(200, update_result)
+    
+    def toggle_auto_response(self):
+        """切換語音自動回應"""
+        enabled = self.control_panel.auto_response_switch.get()
+        
+        try:
+            result = self.event_handlers.handle_toggle_auto_response(enabled)
+            if result.get('success'):
+                status = "啟用" if enabled else "禁用"
+                self.system_panel.add_system_message("stt", f"語音自動回應已{status}", "")
+            else:
+                self.system_panel.add_system_message("error", "自動回應切換失敗", result.get('error', ''))
+        except Exception as e:
+            self.system_panel.add_system_message("error", "自動回應操作失敗", str(e))
+    
+    def update_stt_sensitivity(self, sensitivity: float):
+        """更新STT靈敏度"""
+        try:
+            result = self.event_handlers.handle_update_stt_sensitivity(sensitivity)
+            if result.get('success'):
+                self.system_panel.add_system_message("stt", "靈敏度已更新", f"新值: {sensitivity:.1f}")
+            else:
+                self.system_panel.add_system_message("error", "靈敏度更新失敗", result.get('error', ''))
+        except Exception as e:
+            self.system_panel.add_system_message("error", "靈敏度操作失敗", str(e))
+    
+    def toggle_voice_input(self):
+        """切換語音輸入（聊天面板的語音按鈕）"""
+        try:
+            # 檢查STT是否可用
+            stt_status = self.event_handlers.handle_get_stt_status()
+            
+            if not stt_status.get('success') or not stt_status.get('stt_available'):
+                self.system_panel.add_system_message("warning", "語音功能不可用", "請先在控制面板啟用STT語音識別")
+                return
+            
+            if not stt_status.get('stt_enabled'):
+                self.system_panel.add_system_message("warning", "語音識別未啟用", "請先在控制面板啟用STT")
+                return
+            
+            is_listening = stt_status.get('is_listening', False)
+            
+            if is_listening:
+                # 當前正在聆聽，停止聆聽
+                self.stop_voice_input()
+            else:
+                # 當前未聆聽，開始聆聽
+                self.start_voice_input()
+                
+        except Exception as e:
+            self.system_panel.add_system_message("error", "語音輸入切換失敗", str(e))
+    
+    def start_voice_input(self):
+        """開始語音輸入"""
+        try:
+            self.chat_panel.update_voice_status(True, "🎤 正在啟動語音識別...")
+            self.chat_panel.clear_voice_preview()
+            
+            # 註冊語音轉錄回調
+            self._setup_voice_callbacks()
+            
+            # 實際啟動STT監聽 - 關鍵修正！
+            def start_listening():
+                future = self.async_helper.run_async_task(
+                    self.core_service.start_stt_listening()
+                )
+                
+                def check_result():
+                    if not future.done():
+                        self.root.after(100, check_result)
+                        return
+                    
+                    try:
+                        result = future.result()
+                        if result.get('success'):
+                            self.chat_panel.update_voice_status(True, "🎤 正在聆聽，請說話...")
+                            self.system_panel.add_system_message("stt", "語音輸入已啟動", "開始語音識別")
+                        else:
+                            error_msg = result.get('error', '未知錯誤')
+                            self.chat_panel.update_voice_status(False, f"❌ 啟動失敗: {error_msg}")
+                            self.system_panel.add_system_message("error", "語音輸入啟動失敗", error_msg)
+                    except Exception as e:
+                        self.chat_panel.update_voice_status(False, f"❌ 啟動異常: {str(e)}")
+                        self.system_panel.add_system_message("error", "語音輸入啟動異常", str(e))
+                
+                self.root.after(100, check_result)
+            
+            start_listening()
+            
+        except Exception as e:
+            self.chat_panel.update_voice_status(False, "❌ 語音輸入啟動失敗")
+            self.system_panel.add_system_message("error", "語音輸入啟動失敗", str(e))
+    
+    def stop_voice_input(self):
+        """停止語音輸入"""
+        try:
+            self.chat_panel.update_voice_status(True, "⏳ 正在停止語音識別...")
+            
+            # 實際停止STT監聽 - 關鍵修正！
+            def stop_listening():
+                future = self.async_helper.run_async_task(
+                    self.core_service.stop_stt_listening()
+                )
+                
+                def check_result():
+                    if not future.done():
+                        self.root.after(100, check_result)
+                        return
+                    
+                    try:
+                        result = future.result()
+                        self.chat_panel.update_voice_status(False, "🎤 語音輸入已停止")
+                        
+                        # 如果有預覽內容，確認是否要保留
+                        preview_text = self.chat_panel.voice_preview_text
+                        if preview_text:
+                            self.chat_panel.update_voice_preview(preview_text, is_final=True)
+                            
+                        self.system_panel.add_system_message("stt", "語音輸入已停止", "")
+                    except Exception as e:
+                        self.chat_panel.update_voice_status(False, f"❌ 停止異常: {str(e)}")
+                        self.system_panel.add_system_message("error", "語音輸入停止異常", str(e))
+                
+                self.root.after(100, check_result)
+                
+            stop_listening()
+            
+        except Exception as e:
+            self.system_panel.add_system_message("error", "語音輸入停止失敗", str(e))
+    
+    def _setup_voice_callbacks(self):
+        """設置語音回調"""
+        try:
+            # 設置GUI語音回調到核心服務
+            self.core_service.set_gui_voice_callbacks(
+                preview_callback=self._on_voice_preview,
+                status_callback=self._on_voice_status,
+                stop_callback=self._on_voice_stopped
+            )
+            self.system_panel.add_system_message("system", "語音回調設置完成", "GUI已連接到語音服務")
+        except Exception as e:
+            self.system_panel.add_system_message("error", "語音回調設置失敗", str(e))
+    
+    def _on_voice_preview(self, text: str, is_final: bool):
+        """語音預覽回調（從核心服務調用）"""
+        try:
+            # 需要在主線程中更新GUI
+            self.root.after(0, lambda: self.chat_panel.update_voice_preview(text, is_final))
+        except Exception as e:
+            self.logger.error(f"語音預覽回調錯誤: {e}")
+    
+    def _on_voice_status(self, is_listening: bool, status_text: str):
+        """語音狀態回調（從核心服務調用）"""
+        try:
+            # 需要在主線程中更新GUI
+            self.root.after(0, lambda: self.chat_panel.update_voice_status(is_listening, status_text))
+        except Exception as e:
+            self.logger.error(f"語音狀態回調錯誤: {e}")
+    
+    def _on_voice_stopped(self):
+        """語音停止回調（從核心服務調用）"""
+        try:
+            # 需要在主線程中更新GUI狀態
+            def update_gui():
+                self.logger.debug("🔇 收到語音停止回調，更新GUI狀態...")
+                
+                # 強制重置語音按鈕狀態
+                self.chat_panel.voice_button.configure(
+                    text="🎤",
+                    fg_color="#2E7D32",  # 綠色表示可用
+                    hover_color="#1B5E20"
+                )
+                
+                # 重置內部狀態
+                self.chat_panel.is_voice_listening = False
+                
+                # 清除語音預覽（如果有內容，設為最終結果）
+                if hasattr(self.chat_panel, 'voice_preview_text') and self.chat_panel.voice_preview_text:
+                    # 保留最後的預覽內容作為最終結果
+                    final_text = self.chat_panel.voice_preview_text
+                    self.chat_panel.update_voice_preview(final_text, True)
+                    self.logger.debug(f"保留語音預覽最終結果: {final_text}")
+                else:
+                    # 沒有預覽內容，清空
+                    self.chat_panel.update_voice_preview("", True)
+                
+                # 更新狀態顯示
+                self.chat_panel.update_voice_status(False, "🎤 語音監聽已停止")
+                
+                # 添加系統消息
+                self.system_panel.add_system_message("stt", "語音監聽已停止", "語音識別已成功停止")
+                
+                self.logger.debug("✅ GUI語音狀態已完全重置")
+            
+            self.root.after(0, update_gui)
+        except Exception as e:
+            self.logger.error(f"語音停止回調錯誤: {e}")
+            # 即使出錯也要嘗試重置狀態
+            try:
+                self.root.after(0, lambda: self.chat_panel.update_voice_status(False, "❌ 語音停止異常"))
+            except:
+                pass
+    
+    def _initialize_voice_status(self):
+        """初始化語音功能狀態"""
+        try:
+            # 獲取STT狀態
+            stt_status = self.event_handlers.handle_get_stt_status()
+            
+            if stt_status.get('success') and stt_status.get('stt_available'):
+                # STT服務可用
+                stt_enabled = stt_status.get('stt_enabled', False)
+                is_listening = stt_status.get('is_listening', False)
+                auto_response = stt_status.get('auto_response_enabled', False)
+                
+                # 更新控制面板狀態
+                self.control_panel.set_stt_controls_state(stt_enabled, is_listening)
+                
+                if stt_enabled:
+                    if is_listening:
+                        self.control_panel.update_stt_status("🎤 正在聆聽", "#2E7D32")
+                        self.chat_panel.set_voice_available(True)
+                        self.chat_panel.update_voice_status(True, "🎤 正在聆聽...")
+                    else:
+                        self.control_panel.update_stt_status("✅ STT 已啟用", "#2E7D32")
+                        self.chat_panel.set_voice_available(True)
+                else:
+                    self.control_panel.update_stt_status("❌ STT 未啟用", "gray")
+                    self.chat_panel.set_voice_available(False)
+                
+                # 設置自動回應狀態
+                if auto_response:
+                    self.control_panel.auto_response_switch.select()
+                else:
+                    self.control_panel.auto_response_switch.deselect()
+                
+                self.system_panel.add_system_message("system", "語音功能狀態檢查完成", 
+                    f"STT: {'已啟用' if stt_enabled else '未啟用'}, 自動回應: {'開啟' if auto_response else '關閉'}")
+            else:
+                # STT服務不可用
+                self.control_panel.update_stt_status("❌ STT 服務不可用", "#D32F2F")
+                self.chat_panel.set_voice_available(False)
+                self.control_panel.set_stt_controls_state(False)
+                
+                self.system_panel.add_system_message("warning", "語音功能不可用", 
+                    stt_status.get('message', 'STT 服務未初始化'))
+        
+        except Exception as e:
+            self.control_panel.update_stt_status("❌ 狀態檢查失敗", "#D32F2F")
+            self.chat_panel.set_voice_available(False)
+            self.system_panel.add_system_message("error", "語音狀態初始化失敗", str(e))
     
     def on_typing_preset_change(self, preset: str):
         """打字速度預設變更"""

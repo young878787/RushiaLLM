@@ -121,6 +121,7 @@ class RealtimeSTTService:
         self.transcription_callbacks: List[Callable] = []
         self.recording_callbacks: List[Callable] = []
         self.error_callbacks: List[Callable] = []
+        self._stop_callbacks: List[Callable] = []
         
         # 統計資料
         self.stats = {
@@ -151,6 +152,7 @@ class RealtimeSTTService:
         # 線程安全
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self.listening_thread: Optional[threading.Thread] = None
     
     def _load_config(self, user_config: Dict[str, Any]) -> STTConfig:
         """載入和驗證配置"""
@@ -276,48 +278,108 @@ class RealtimeSTTService:
         if not self.is_initialized:
             self.logger.error("STT 服務未初始化")
             return False
-        
+
         if self.is_listening:
             self.logger.warning("STT 服務已在監聽中")
             return True
-        
+
         try:
-            self.is_listening = True
+            # 確保停止事件已清除
             self._stop_event.clear()
             
-            # 啟動監聽線程
+            # 清理緩存，避免顯示上一次的結果
+            self.realtime_text_buffer = ""
+            self.logger.debug("清理 realtime_text_buffer")
+
+            # 設置監聽狀態
+            self.is_listening = True
+
+            # 重置監聽線程（如果存在舊線程）
+            if self.listening_thread and self.listening_thread.is_alive():
+                self.logger.warning("發現活躍的舊監聽線程，等待其結束...")
+                self.listening_thread.join(timeout=1.0)
+
+            # 啟動新的監聽線程
             self.listening_thread = threading.Thread(target=self._listening_loop, daemon=True)
             self.listening_thread.start()
-            
+
             self.logger.info("🎤 開始語音監聽...")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"啟動語音監聽失敗: {e}")
             self.is_listening = False
             return False
-    
+
     def stop_listening(self) -> bool:
         """停止語音監聽"""
         try:
             if not self.is_listening:
+                self.logger.debug("語音監聽已經停止")
                 return True
             
+            self.logger.info("正在停止語音監聽...")
+            
+            # 首先設置停止標誌
             self.is_listening = False
             self._stop_event.set()
             
-            # 停止錄音器
-            if self.recorder:
+            # RealtimeSTT 的正確停止順序很重要
+            try:
+                if self.recorder:
+                    self.logger.debug("正在停止 RealtimeSTT 錄音器...")
+                    
+                    # 1. 首先嘗試 abort() - 立即中止當前處理
+                    if hasattr(self.recorder, 'abort'):
+                        self.logger.debug("調用 abort() 停止當前處理...")
+                        self.recorder.abort()
+                    
+                    # 2. 然後調用 stop() - 正常停止錄音
+                    if hasattr(self.recorder, 'stop'):
+                        self.logger.debug("調用 stop() 停止錄音...")
+                        self.recorder.stop()
+                    
+                    # 3. 不調用 shutdown() - 留給 cleanup() 處理
+                    # shutdown() 可能會阻塞，所以我們跳過它
+                    self.logger.debug("跳過 shutdown() 調用以避免阻塞")
+                        
+                    self.logger.debug("RealtimeSTT 停止序列完成")
+            except Exception as e:
+                self.logger.warning(f"停止 RealtimeSTT 時出現錯誤: {e}")
+            
+            # 等待監聽線程結束
+            if self.listening_thread and self.listening_thread.is_alive():
+                self.logger.debug("等待監聽線程結束...")
+                
+                # 縮短等待時間，避免卡住太久
+                join_timeout = 0.5  # 只等待0.5秒
+                self.listening_thread.join(timeout=join_timeout)
+                
+                if self.listening_thread.is_alive():
+                    self.logger.debug(f"監聽線程未在 {join_timeout} 秒內結束，設為後台完成")
+                    # 不要阻塞，讓線程在後台自然結束
+                else:
+                    self.logger.debug("監聽線程已正常結束")
+            
+            # 重置狀態
+            self._stop_event.clear()
+            self.listening_thread = None
+            
+            # 觸發停止回調通知GUI
+            for callback in self._stop_callbacks:
                 try:
-                    self.recorder.shutdown()
-                except:
-                    pass
+                    callback()
+                except Exception as e:
+                    self.logger.error(f"停止回調執行失敗: {e}")
             
             self.logger.info("🔇 語音監聽已停止")
             return True
             
         except Exception as e:
             self.logger.error(f"停止語音監聽失敗: {e}")
+            # 即使出錯也要確保狀態正確
+            self.is_listening = False
+            self._stop_event.set()
             return False
     
     def _listening_loop(self):
@@ -326,28 +388,82 @@ class RealtimeSTTService:
         
         try:
             while self.is_listening and not self._stop_event.is_set():
-                # 等待並獲取轉錄結果
-                transcription = self.recorder.text()
-                
-                if transcription and transcription.strip():
-                    # 處理轉錄結果
-                    self._process_transcription(transcription.strip())
-                
-                # 檢查即時轉錄
-                if self.realtime_transcription_enabled:
-                    realtime_text = getattr(self.recorder, 'realtime_text', '')
-                    if realtime_text and realtime_text != self.realtime_text_buffer:
-                        self._process_realtime_text(realtime_text)
-                        self.realtime_text_buffer = realtime_text
-                
-                # 短暫休息避免過度占用 CPU
-                time.sleep(0.01)
+                try:
+                    self.logger.debug("等待語音輸入...")
+                    
+                    # 在調用 text() 之前再次檢查停止標誌
+                    if not self.is_listening or self._stop_event.is_set():
+                        self.logger.debug("監聽循環收到停止信號，準備退出")
+                        break
+                    
+                    # RealtimeSTT的text()方法是阻塞的，但會在沒有音頻時快速返回空字符串
+                    try:
+                        transcription = self.recorder.text()
+                    except Exception as text_error:
+                        # text()方法被中斷或出錯
+                        if "abort" in str(text_error).lower() or "stop" in str(text_error).lower():
+                            self.logger.debug(f"text() 方法被中斷: {text_error}")
+                            break
+                        else:
+                            self.logger.warning(f"text() 方法異常: {text_error}")
+                            # 短暫休息後繼續
+                            time.sleep(0.1)
+                            continue
+                    
+                    # text()返回後立即檢查是否需要停止
+                    if not self.is_listening or self._stop_event.is_set():
+                        self.logger.debug("監聽已停止，忽略轉錄結果")
+                        break
+                    
+                    if transcription and transcription.strip():
+                        self.logger.debug(f"收到轉錄結果: {transcription}")
+                        
+                        # 處理轉錄前再次檢查狀態
+                        if not self.is_listening or self._stop_event.is_set():
+                            self.logger.debug("處理轉錄前發現停止信號，跳過處理")
+                            break
+                            
+                        # 處理轉錄結果
+                        self._process_transcription(transcription.strip())
+                    else:
+                        self.logger.debug("收到空轉錄結果，繼續監聽")
+                        # 短暫休息避免空循環消耗CPU
+                        if self.is_listening and not self._stop_event.is_set():
+                            time.sleep(0.01)
+                    
+                    # 檢查即時轉錄（如果啟用）
+                    if self.config.enable_realtime_transcription and not self._stop_event.is_set():
+                        try:
+                            realtime_text = getattr(self.recorder, 'realtime_text', '')
+                            if realtime_text and realtime_text != self.realtime_text_buffer:
+                                if self.is_listening and not self._stop_event.is_set():
+                                    self._process_realtime_text(realtime_text)
+                                    self.realtime_text_buffer = realtime_text
+                        except AttributeError:
+                            # realtime_text 屬性可能不存在
+                            pass
+                        except Exception as e:
+                            self.logger.debug(f"即時轉錄處理錯誤: {e}")
+                    
+                except Exception as e:
+                    # 捕獲單次處理的錯誤，但不中斷整個循環
+                    self.logger.error(f"語音處理錯誤: {e}")
+                    self._trigger_error_callbacks(str(e))
+                    
+                    # 如果是嚴重錯誤或收到停止信號，退出循環
+                    if not self.is_listening or self._stop_event.is_set():
+                        break
+                        
+                    # 短暫休息後繼續
+                    time.sleep(0.1)
                 
         except Exception as e:
-            self.logger.error(f"監聽循環錯誤: {e}")
+            self.logger.error(f"監聽循環嚴重錯誤: {e}")
             self._trigger_error_callbacks(str(e))
         finally:
             self.logger.info("STT 監聽循環結束")
+            # 確保在循環結束時清理狀態
+            self.is_listening = False
     
     def _process_transcription(self, text: str):
         """處理完整轉錄結果"""
@@ -355,6 +471,8 @@ class RealtimeSTTService:
             with self._lock:
                 self.stats["total_transcriptions"] += 1
                 self.stats["last_transcription"] = datetime.now()
+            
+            self.logger.debug(f"開始處理轉錄: {text}")
             
             # 應用 OpenCC 轉換（簡轉繁）
             converted_text = self._convert_text_with_opencc(text)
@@ -375,10 +493,11 @@ class RealtimeSTTService:
                 self.logger.debug(f"   轉換後: {converted_text}")
             
             # 觸發回調
+            self.logger.debug(f"觸發 {len(self.transcription_callbacks)} 個轉錄回調")
             self._trigger_transcription_callbacks(result)
             
         except Exception as e:
-            self.logger.error(f"處理轉錄結果失敗: {e}")
+            self.logger.error(f"轉錄處理失敗: {e}")
             self._trigger_error_callbacks(str(e))
     
     def _process_realtime_text(self, text: str):
@@ -570,6 +689,10 @@ class RealtimeSTTService:
         """添加錯誤回調"""
         self.error_callbacks.append(callback)
     
+    def add_stop_callback(self, callback: Callable[[], None]):
+        """添加停止監聽回調"""
+        self._stop_callbacks.append(callback)
+    
     def remove_transcription_callback(self, callback: Callable):
         """移除轉錄回調"""
         if callback in self.transcription_callbacks:
@@ -584,6 +707,11 @@ class RealtimeSTTService:
         """移除錯誤回調"""
         if callback in self.error_callbacks:
             self.error_callbacks.remove(callback)
+    
+    def remove_stop_callback(self, callback: Callable):
+        """移除停止回調"""
+        if callback in self._stop_callbacks:
+            self._stop_callbacks.remove(callback)
     
     # ==================== 配置管理 ====================
     
@@ -681,27 +809,102 @@ class RealtimeSTTService:
     # ==================== 清理資源 ====================
     
     def cleanup(self):
-        """清理資源"""
+        """清理資源 - 極速版本，跳過可能阻塞的操作"""
         try:
-            self.stop_listening()
+            self.logger.info("開始清理 STT 服務資源...")
             
-            if self.recorder:
-                try:
-                    self.recorder.shutdown()
-                except:
-                    pass
-                self.recorder = None
+            # 立即重置所有狀態 - 這些操作絕對不會阻塞
+            self.is_listening = False
+            self.is_initialized = False
+            self._stop_event.set()
             
-            # 清理回調
+            # 立即清理回調列表
             self.transcription_callbacks.clear()
             self.recording_callbacks.clear()
             self.error_callbacks.clear()
+            self._stop_callbacks.clear()
             
-            self.is_initialized = False
-            self.logger.info("✅ STT 服務資源清理完成")
+            # 清理線程引用
+            self.listening_thread = None
+            
+            # 對於 RealtimeSTT 錄音器：完全異步處理，主線程不等待
+            if self.recorder:
+                self.logger.debug("將 RealtimeSTT 清理完全移至後台...")
+                
+                # 保存引用供後台處理
+                recorder_ref = self.recorder
+                
+                # 立即清空主引用 - 這是關鍵！
+                self.recorder = None
+                
+                # 啟動完全獨立的後台處理
+                import threading
+                import weakref
+                
+                def ultra_async_cleanup():
+                    """超級異步清理 - 在完全獨立的線程中處理"""
+                    try:
+                        # 嘗試設置停止標誌（快速操作）
+                        quick_flags = ['_stop_requested', 'running', '_is_running']
+                        for flag in quick_flags:
+                            if hasattr(recorder_ref, flag):
+                                try:
+                                    if 'stop' in flag:
+                                        setattr(recorder_ref, flag, True)
+                                    else:
+                                        setattr(recorder_ref, flag, False)
+                                except:
+                                    pass
+                        
+                        # 嘗試快速停止（相對快速）
+                        for method in ['abort', 'stop']:
+                            if hasattr(recorder_ref, method):
+                                try:
+                                    getattr(recorder_ref, method)()
+                                except:
+                                    pass
+                        
+                        # shutdown 可能很慢，但在後台執行不影響主線程
+                        if hasattr(recorder_ref, 'shutdown'):
+                            try:
+                                recorder_ref.shutdown()
+                            except:
+                                pass
+                                
+                    except Exception:
+                        # 靜默處理所有異常，不影響主程序
+                        pass
+                    finally:
+                        # 清理引用
+                        try:
+                            del recorder_ref
+                        except:
+                            pass
+                
+                # 創建守護進程線程，不會阻塞程序退出
+                cleanup_thread = threading.Thread(
+                    target=ultra_async_cleanup,
+                    daemon=True,  # 關鍵：守護線程
+                    name="RealtimeSTT_UltraCleanup"
+                )
+                cleanup_thread.start()
+                
+                # 主線程不等待，立即繼續
+                self.logger.debug("RealtimeSTT 後台清理已啟動，主線程立即返回")
+            
+            # 最終狀態重置
+            self._stop_event.clear()
+            
+            # 主線程立即完成
+            self.logger.info("✅ STT 服務立即清理完成")
             
         except Exception as e:
             self.logger.error(f"STT 服務清理失敗: {e}")
+        finally:
+            # 絕對確保這些狀態正確
+            self.recorder = None
+            self.is_listening = False
+            self.is_initialized = False
 
 
 # ==================== 便利函數 ====================

@@ -46,6 +46,9 @@ class ControlPanel:
         # RAG控制區域
         self._create_rag_section(ai_tab)
         
+        # STT語音控制區域
+        self._create_stt_section(ai_tab)
+        
         # 打字模擬控制
         self._create_typing_section(ai_tab)
         
@@ -76,6 +79,93 @@ class ControlPanel:
         )
         self.rag_detail_switch.pack(pady=(10, 15))
         self.rag_detail_switch.select()
+    
+    def _create_stt_section(self, parent):
+        """創建STT語音控制區域"""
+        stt_frame = ctk.CTkFrame(parent, corner_radius=10)
+        stt_frame.pack(fill="x", padx=10, pady=10)
+        
+        ctk.CTkLabel(
+            stt_frame,
+            text="🎤 語音識別",
+            font=self.fonts['subtitle']
+        ).pack(pady=(15, 5))
+        
+        # STT 主控制開關
+        self.stt_switch = ctk.CTkSwitch(
+            stt_frame,
+            text="啟用語音識別",
+            command=self.handlers.get('toggle_stt')
+        )
+        self.stt_switch.pack(pady=5)
+        
+        # 自動回應控制
+        self.auto_response_switch = ctk.CTkSwitch(
+            stt_frame,
+            text="語音自動回應",
+            command=self.handlers.get('toggle_auto_response')
+        )
+        self.auto_response_switch.pack(pady=5)
+        
+        # 靈敏度控制
+        sensitivity_frame = ctk.CTkFrame(stt_frame, fg_color="transparent")
+        sensitivity_frame.pack(fill="x", padx=10, pady=10)
+        
+        ctk.CTkLabel(sensitivity_frame, text="語音檢測靈敏度:", font=self.fonts['body']).pack()
+        
+        self.stt_sensitivity_slider = ctk.CTkSlider(
+            sensitivity_frame,
+            from_=0.1,
+            to=1.0,
+            number_of_steps=9
+        )
+        self.stt_sensitivity_slider.pack(pady=5, fill="x")
+        self.stt_sensitivity_slider.set(0.5)
+        
+        self.sensitivity_label = ctk.CTkLabel(
+            sensitivity_frame,
+            text="0.5",
+            font=self.fonts['body']
+        )
+        self.sensitivity_label.pack()
+        
+        # 綁定滑桿事件
+        self.stt_sensitivity_slider.configure(command=self._on_sensitivity_change)
+        
+        # STT 狀態顯示
+        self.stt_status_label = ctk.CTkLabel(
+            stt_frame,
+            text="❌ STT 未啟用",
+            font=self.fonts['body'],
+            text_color="gray"
+        )
+        self.stt_status_label.pack(pady=(5, 15))
+    
+    def _on_sensitivity_change(self, value):
+        """靈敏度滑桿變化處理"""
+        self.sensitivity_label.configure(text=f"{value:.1f}")
+        if self.handlers.get('update_stt_sensitivity'):
+            self.handlers['update_stt_sensitivity'](float(value))
+    
+    def update_stt_status(self, status_text: str, color: str = "gray"):
+        """更新STT狀態顯示"""
+        if hasattr(self, 'stt_status_label'):
+            self.stt_status_label.configure(text=status_text, text_color=color)
+    
+    def set_stt_controls_state(self, stt_enabled: bool, is_listening: bool = False):
+        """設置STT控制組件狀態"""
+        if hasattr(self, 'stt_switch'):
+            if stt_enabled:
+                self.stt_switch.select()
+            else:
+                self.stt_switch.deselect()
+        
+        # 根據狀態禁用/啟用其他控制
+        controls_enabled = "normal" if stt_enabled else "disabled"
+        if hasattr(self, 'auto_response_switch'):
+            self.auto_response_switch.configure(state=controls_enabled)
+        if hasattr(self, 'stt_sensitivity_slider'):
+            self.stt_sensitivity_slider.configure(state=controls_enabled)
     
     def _create_typing_section(self, parent):
         """創建打字模擬區域"""

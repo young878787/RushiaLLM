@@ -33,6 +33,10 @@ class VTuberCoreService:
         self.stt_service: Optional[RealtimeSTTService] = None
         self.rag_enabled = True
         
+        # GUI 回調機制
+        self.gui_voice_preview_callback = None
+        self.gui_voice_status_callback = None
+        
         # 過濾器控制
         self.line_break_enabled = config.get('vtuber', {}).get('response', {}).get('enable_line_break', True)
         
@@ -127,11 +131,14 @@ class VTuberCoreService:
             # 創建 STT 服務
             self.stt_service = await create_stt_service(self.config)
             
-            # 註冊 STT 回調
-            if self.auto_response_enabled:
-                self.stt_service.add_transcription_callback(self._on_stt_transcription)
+            # 註冊 STT 轉錄回調 - 無論是否自動回應都要註冊，因為GUI需要預覽功能
+            self.stt_service.add_transcription_callback(self._on_stt_transcription)
             
+            # 註冊錯誤回調
             self.stt_service.add_error_callback(self._on_stt_error)
+            
+            # 註冊停止回調
+            self.stt_service.add_stop_callback(self._on_stt_stopped)
             
             self.logger.info("✅ STT 服務初始化完成")
             
@@ -143,10 +150,19 @@ class VTuberCoreService:
     async def _on_stt_transcription(self, result: TranscriptionResult):
         """STT 轉錄結果回調"""
         try:
+            # 實時預覽功能 - 即使不是最終結果也要更新GUI
+            if self.gui_voice_preview_callback and result.text.strip():
+                self.gui_voice_preview_callback(result.text, result.is_final)
+            
+            # 只處理最終結果
             if not result.is_final or not result.text.strip():
                 return
             
             self.logger.info(f"🎤 收到語音輸入: {result.text}")
+            
+            # 通知GUI語音識別完成
+            if self.gui_voice_status_callback:
+                self.gui_voice_status_callback(False, f"✅ 識別完成: {result.text[:20]}...")
             
             # 如果啟用自動回應，生成AI回應
             if self.auto_response_enabled:
@@ -167,10 +183,33 @@ class VTuberCoreService:
             
         except Exception as e:
             self.logger.error(f"處理STT轉錄結果失敗: {e}")
+            if self.gui_voice_status_callback:
+                self.gui_voice_status_callback(False, f"❌ 語音處理錯誤: {str(e)}")
     
     def _on_stt_error(self, error_message: str):
         """STT 錯誤回調"""
         self.logger.error(f"STT 錯誤: {error_message}")
+        if self.gui_voice_status_callback:
+            self.gui_voice_status_callback(False, f"❌ STT 錯誤: {error_message}")
+    
+    def _on_stt_stopped(self):
+        """STT 停止回調"""
+        self.logger.info("🔇 STT 監聽已停止")
+        # 通知GUI更新狀態
+        if self.gui_voice_status_callback:
+            self.gui_voice_status_callback(False, "⏹️ 語音監聽已停止")
+        # 調用GUI停止回調（如果有）
+        if self.gui_voice_stop_callback:
+            try:
+                self.gui_voice_stop_callback()
+            except Exception as e:
+                self.logger.error(f"GUI停止回調執行失敗: {e}")
+    
+    def set_gui_voice_callbacks(self, preview_callback=None, status_callback=None, stop_callback=None):
+        """設置GUI語音回調函數"""
+        self.gui_voice_preview_callback = preview_callback
+        self.gui_voice_status_callback = status_callback
+        self.gui_voice_stop_callback = stop_callback
     
     async def generate_response(self, user_id: str, user_input: str, **kwargs) -> Dict[str, Any]:
         """生成AI回應 - 統一接口"""
@@ -539,13 +578,69 @@ class VTuberCoreService:
             return {
                 "stt_available": True,
                 "stt_enabled": self.stt_enabled,
-                "is_listening": stats.get("is_listening", False),
+                "is_listening": stats.get('is_listening', False),
                 "auto_response_enabled": self.auto_response_enabled,
+                "config_info": config_info,
                 "stats": stats,
-                "config": config_info,
+                "message": "STT 狀態正常",
                 "success": True
             }
         except Exception as e:
+            return {
+                "stt_available": False,
+                "stt_enabled": False,
+                "is_listening": False,
+                "auto_response_enabled": self.auto_response_enabled,
+                "error": str(e),
+                "message": f"STT 狀態檢查失敗: {str(e)}",
+                "success": False
+            }
+    
+    async def start_stt_listening(self) -> Dict[str, Any]:
+        """開始STT監聽（語音按鈕專用）"""
+        try:
+            if not self.stt_service:
+                return {"error": "STT 服務未初始化", "success": False}
+            
+            if not self.stt_enabled:
+                return {"error": "STT 服務未啟用", "success": False}
+            
+            success = self.stt_service.start_listening()
+            if success:
+                return {
+                    "message": "語音監聽已開始",
+                    "success": True
+                }
+            else:
+                return {"error": "STT 監聽啟動失敗", "success": False}
+                
+        except Exception as e:
+            return {"error": str(e), "success": False}
+    
+    async def stop_stt_listening(self) -> Dict[str, Any]:
+        """停止STT監聽（語音按鈕專用）"""
+        try:
+            if not self.stt_service:
+                return {"message": "STT 服務未運行", "success": True}
+            
+            self.logger.info("🔇 核心服務正在停止STT監聽...")
+            
+            # 調用STT服務的停止方法
+            success = self.stt_service.stop_listening()
+            
+            if success:
+                self.logger.info("✅ STT監聽已成功停止")
+                return {
+                    "message": "語音監聽已停止",
+                    "is_listening": False,
+                    "success": True
+                }
+            else:
+                self.logger.error("❌ STT監聽停止失敗")
+                return {"error": "STT 監聽停止失敗", "success": False}
+                
+        except Exception as e:
+            self.logger.error(f"停止STT監聽異常: {e}")
             return {"error": str(e), "success": False}
     
     def update_stt_sensitivity(self, silero_sensitivity: float = None, webrtc_sensitivity: int = None) -> Dict[str, Any]:

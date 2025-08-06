@@ -382,3 +382,49 @@ class EventHandlers:
                 'success': False,
                 'error': f"知識庫恢復失敗: {str(e)}"
             }
+    
+    # ==================== STT 語音控制 ====================
+    
+    async def handle_toggle_stt(self, enabled: bool) -> Dict[str, Any]:
+        """處理STT語音識別開關"""
+        try:
+            result = await self.core_service.toggle_stt(enabled)
+            return result
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f"STT切換失敗: {str(e)}"
+            }
+    
+    def handle_toggle_auto_response(self, enabled: bool) -> Dict[str, Any]:
+        """處理語音自動回應開關"""
+        try:
+            result = self.core_service.toggle_auto_response(enabled)
+            return result
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f"自動回應切換失敗: {str(e)}"
+            }
+    
+    def handle_update_stt_sensitivity(self, sensitivity: float) -> Dict[str, Any]:
+        """處理STT靈敏度更新"""
+        try:
+            result = self.core_service.update_stt_sensitivity(silero_sensitivity=sensitivity)
+            return result
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f"靈敏度更新失敗: {str(e)}"
+            }
+    
+    def handle_get_stt_status(self) -> Dict[str, Any]:
+        """獲取STT狀態"""
+        try:
+            result = self.core_service.get_stt_status()
+            return result
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f"獲取STT狀態失敗: {str(e)}"
+            }
