@@ -94,6 +94,9 @@ class STTConfig:
     enable_opencc: bool = True  # 啟用 OpenCC 簡轉繁
     opencc_config: str = "s2twp.json"  # OpenCC 配置文件
     
+    # 自動控制配置
+    auto_stop_after_transcription: bool = False  # 收到轉錄結果後自動停止監聽
+    
     # 其他配置
     beam_size: int = 5
     initial_prompt: Optional[str] = None
@@ -132,6 +135,9 @@ class RealtimeSTTService:
             "last_transcription": None,
             "error_count": 0
         }
+        
+        # 配置選項
+        self.auto_stop_after_transcription = config.get('auto_stop_after_transcription', False)
         
         # 即時轉錄狀態
         self.realtime_transcription_enabled = self.config.enable_realtime_transcription
@@ -209,6 +215,9 @@ class RealtimeSTTService:
         # OpenCC 配置
         config_dict['enable_opencc'] = stt_config.get('enable_opencc', True)  # 預設啟用
         config_dict['opencc_config'] = stt_config.get('opencc_config', 's2twp.json')  # 簡轉繁（台灣用詞）
+        
+        # 自動停止配置
+        config_dict['auto_stop_after_transcription'] = stt_config.get('auto_stop_after_transcription', False)
         
         # 喚醒詞配置
         wake_words = stt_config.get('wake_words', [])
@@ -495,6 +504,19 @@ class RealtimeSTTService:
             # 觸發回調
             self.logger.debug(f"觸發 {len(self.transcription_callbacks)} 個轉錄回調")
             self._trigger_transcription_callbacks(result)
+            
+            # 檢查是否需要自動停止
+            if self.config.auto_stop_after_transcription:
+                self.logger.debug("配置為轉錄後自動停止，正在停止監聽...")
+                # 延遲停止，讓回調有時間執行
+                import threading
+                def delayed_stop():
+                    import time
+                    time.sleep(0.1)  # 等待100ms讓回調完成
+                    self.stop_listening()
+                
+                stop_thread = threading.Thread(target=delayed_stop, daemon=True)
+                stop_thread.start()
             
         except Exception as e:
             self.logger.error(f"轉錄處理失敗: {e}")
@@ -895,6 +917,9 @@ class RealtimeSTTService:
             # 最終狀態重置
             self._stop_event.clear()
             
+            # 強制結束所有相關進程
+            self._force_cleanup_processes()
+            
             # 主線程立即完成
             self.logger.info("✅ STT 服務立即清理完成")
             
@@ -905,6 +930,31 @@ class RealtimeSTTService:
             self.recorder = None
             self.is_listening = False
             self.is_initialized = False
+
+    def _force_cleanup_processes(self):
+        """強制清理可能殘留的進程"""
+        try:
+            import os
+            # 簡單的清理策略：設置環境變量告訴子進程盡快退出
+            os.environ['FORCE_EXIT'] = '1'
+            
+            # 嘗試清理多進程相關資源
+            try:
+                import multiprocessing
+                # 如果有活躍的進程池，嘗試關閉
+                if hasattr(multiprocessing, 'active_children'):
+                    children = multiprocessing.active_children()
+                    for child in children:
+                        try:
+                            child.terminate()
+                        except:
+                            pass
+            except:
+                pass
+                
+            self.logger.debug("完成進程清理檢查")
+        except Exception as e:
+            self.logger.debug(f"進程清理時出現異常: {e}")
 
 
 # ==================== 便利函數 ====================

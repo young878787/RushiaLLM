@@ -446,9 +446,9 @@ class ChatPanel:
     def clear_voice_preview(self):
         """清除語音預覽"""
         self.voice_preview_text = ""
-        current_content = self.message_input.get("1.0", "end-1c")
-        if current_content.startswith("[預覽]"):
-            self.message_input.delete("1.0", "end")
+        # 無論輸入框內容是什麼，都清空
+        self.message_input.delete("1.0", "end")
+        self.logger.debug("語音預覽已清除") if hasattr(self, 'logger') else None
     
     def set_voice_available(self, available: bool):
         """設置語音功能可用性"""

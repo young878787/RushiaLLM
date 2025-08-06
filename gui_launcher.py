@@ -8,8 +8,30 @@ import asyncio
 import logging
 import sys
 import os
+import signal
 from pathlib import Path
 import yaml
+
+def setup_exit_handler():
+    """設置程序退出處理器，確保程序能正常退出"""
+    def signal_handler(signum, frame):
+        print(f"\n🛑 收到退出信號 {signum}，正在強制退出...")
+        # 強制結束所有子進程
+        try:
+            import psutil
+            current_process = psutil.Process(os.getpid())
+            for child in current_process.children(recursive=True):
+                child.terminate()
+        except:
+            pass
+        
+        # 強制退出
+        os._exit(0)
+    
+    # 註冊信號處理器
+    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, signal_handler)  # 終止信號
 
 def check_dependencies():
     """檢查並安裝所需依賴"""
@@ -56,6 +78,9 @@ async def main():
     """主函數"""
     try:
         print("🚀 啟動 VTuber AI CustomTkinter GUI...")
+        
+        # 設置退出處理器
+        setup_exit_handler()
         
         # 檢查依賴
         check_dependencies()
@@ -112,8 +137,21 @@ async def main():
             gui.run()
             
             # 清理資源
-            core_service.cleanup()
-            print("✅ VTuber AI GUI 已安全關閉")
+            print("\n🧹 正在清理資源...")
+            try:
+                core_service.cleanup()
+                print("✅ VTuber AI GUI 已安全關閉")
+            except Exception as e:
+                print(f"⚠️  清理過程中出現問題: {e}")
+                print("✅ VTuber AI GUI 已關閉")
+            
+            # 確保程序能正常退出
+            try:
+                # 給所有daemon線程一點時間結束
+                import time
+                time.sleep(0.5)
+            except:
+                pass
         else:
             print("❌ 核心服務初始化失敗")
             sys.exit(1)
@@ -125,6 +163,24 @@ async def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        # 確保程序能退出的最後保險
+        try:
+            # 清理多進程資源
+            import multiprocessing
+            multiprocessing.get_context().shutdown()
+        except:
+            pass
+        
+        # 如果5秒後還沒退出，強制退出
+        import threading
+        def force_exit():
+            import time
+            time.sleep(5)
+            print("⚠️  程序可能卡住，強制退出")
+            os._exit(0)
+        
+        threading.Thread(target=force_exit, daemon=True).start()
 
 
 if __name__ == "__main__":

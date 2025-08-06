@@ -533,28 +533,55 @@ class VTuberCustomGUI:
             if not stt_status.get('success') or not stt_status.get('stt_available'):
                 self.system_panel.add_system_message("warning", "語音功能不可用", "請先在控制面板啟用STT語音識別")
                 return
-            
+
             if not stt_status.get('stt_enabled'):
                 self.system_panel.add_system_message("warning", "語音識別未啟用", "請先在控制面板啟用STT")
                 return
+
+            # 使用服務狀態而非GUI狀態進行判斷，確保同步
+            is_currently_listening = stt_status.get('is_listening', False)
             
-            is_listening = stt_status.get('is_listening', False)
-            
-            if is_listening:
+            self.logger.debug(f"語音按鈕切換: 服務狀態={is_currently_listening}, GUI狀態={self.chat_panel.is_voice_listening}")
+
+            if is_currently_listening:
                 # 當前正在聆聽，停止聆聽
+                self.logger.debug("執行停止語音輸入")
                 self.stop_voice_input()
             else:
                 # 當前未聆聽，開始聆聽
+                self.logger.debug("執行開始語音輸入")
                 self.start_voice_input()
                 
         except Exception as e:
+            self.logger.error(f"語音輸入切換失敗: {e}")
             self.system_panel.add_system_message("error", "語音輸入切換失敗", str(e))
-    
+
     def start_voice_input(self):
         """開始語音輸入"""
         try:
+            # 檢查是否已經在監聽，如果是則先停止
+            stt_status = self.event_handlers.handle_get_stt_status()
+            if stt_status.get('is_listening', False):
+                self.logger.warning("檢測到STT已在監聽中，先停止現有監聽...")
+                # 先停止現有的監聽，不等待回調
+                stop_future = self.async_helper.run_async_task(
+                    self.core_service.stop_stt_listening()
+                )
+                # 等待停止完成
+                import time
+                timeout = 2.0  # 最多等2秒
+                start_time = time.time()
+                while not stop_future.done() and (time.time() - start_time) < timeout:
+                    self.root.update()
+                    time.sleep(0.1)
+                
+                self.logger.debug("現有監聽已停止，繼續開始新的監聽")
+            
             self.chat_panel.update_voice_status(True, "🎤 正在啟動語音識別...")
             self.chat_panel.clear_voice_preview()
+            
+            # 強制同步GUI狀態
+            self.chat_panel.is_voice_listening = True
             
             # 註冊語音轉錄回調
             self._setup_voice_callbacks()
@@ -575,12 +602,15 @@ class VTuberCustomGUI:
                         if result.get('success'):
                             self.chat_panel.update_voice_status(True, "🎤 正在聆聽，請說話...")
                             self.system_panel.add_system_message("stt", "語音輸入已啟動", "開始語音識別")
+                            self.logger.debug("語音監聽啟動成功")
                         else:
                             error_msg = result.get('error', '未知錯誤')
                             self.chat_panel.update_voice_status(False, f"❌ 啟動失敗: {error_msg}")
+                            self.chat_panel.is_voice_listening = False  # 重置狀態
                             self.system_panel.add_system_message("error", "語音輸入啟動失敗", error_msg)
                     except Exception as e:
                         self.chat_panel.update_voice_status(False, f"❌ 啟動異常: {str(e)}")
+                        self.chat_panel.is_voice_listening = False  # 重置狀態
                         self.system_panel.add_system_message("error", "語音輸入啟動異常", str(e))
                 
                 self.root.after(100, check_result)
@@ -589,14 +619,19 @@ class VTuberCustomGUI:
             
         except Exception as e:
             self.chat_panel.update_voice_status(False, "❌ 語音輸入啟動失敗")
+            self.chat_panel.is_voice_listening = False  # 重置狀態
             self.system_panel.add_system_message("error", "語音輸入啟動失敗", str(e))
     
     def stop_voice_input(self):
         """停止語音輸入"""
         try:
-            self.chat_panel.update_voice_status(True, "⏳ 正在停止語音識別...")
+            # 立即更新GUI狀態，不等待服務回調
+            self.chat_panel.is_voice_listening = False
+            self.chat_panel.update_voice_status(False, "⏳ 正在停止語音識別...")
             
-            # 實際停止STT監聽 - 關鍵修正！
+            self.logger.debug("立即設置GUI為非監聽狀態")
+            
+            # 實際停止STT監聽
             def stop_listening():
                 future = self.async_helper.run_async_task(
                     self.core_service.stop_stt_listening()
@@ -617,6 +652,7 @@ class VTuberCustomGUI:
                             self.chat_panel.update_voice_preview(preview_text, is_final=True)
                             
                         self.system_panel.add_system_message("stt", "語音輸入已停止", "")
+                        self.logger.debug("語音停止確認完成")
                     except Exception as e:
                         self.chat_panel.update_voice_status(False, f"❌ 停止異常: {str(e)}")
                         self.system_panel.add_system_message("error", "語音輸入停止異常", str(e))
@@ -626,6 +662,7 @@ class VTuberCustomGUI:
             stop_listening()
             
         except Exception as e:
+            self.logger.error(f"停止語音輸入失敗: {e}")
             self.system_panel.add_system_message("error", "語音輸入停止失敗", str(e))
     
     def _setup_voice_callbacks(self):
@@ -674,7 +711,7 @@ class VTuberCustomGUI:
                 # 重置內部狀態
                 self.chat_panel.is_voice_listening = False
                 
-                # 清除語音預覽（如果有內容，設為最終結果）
+                # 清除語音預覽（保留最終結果）
                 if hasattr(self.chat_panel, 'voice_preview_text') and self.chat_panel.voice_preview_text:
                     # 保留最後的預覽內容作為最終結果
                     final_text = self.chat_panel.voice_preview_text
@@ -682,7 +719,10 @@ class VTuberCustomGUI:
                     self.logger.debug(f"保留語音預覽最終結果: {final_text}")
                 else:
                     # 沒有預覽內容，清空
-                    self.chat_panel.update_voice_preview("", True)
+                    self.chat_panel.clear_voice_preview()
+                
+                # 重置語音預覽文本緩存
+                self.chat_panel.voice_preview_text = ""
                 
                 # 更新狀態顯示
                 self.chat_panel.update_voice_status(False, "🎤 語音監聽已停止")
@@ -697,7 +737,11 @@ class VTuberCustomGUI:
             self.logger.error(f"語音停止回調錯誤: {e}")
             # 即使出錯也要嘗試重置狀態
             try:
-                self.root.after(0, lambda: self.chat_panel.update_voice_status(False, "❌ 語音停止異常"))
+                def emergency_reset():
+                    self.chat_panel.is_voice_listening = False
+                    self.chat_panel.voice_preview_text = ""
+                    self.chat_panel.update_voice_status(False, "❌ 語音停止異常")
+                self.root.after(0, emergency_reset)
             except:
                 pass
     
