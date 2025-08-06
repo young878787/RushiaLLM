@@ -17,6 +17,18 @@ pypdf>=3.17.0
 python-docx>=0.8.11
 beautifulsoup4>=4.12.2
 
+# GUI Framework
+customtkinter>=5.2.0
+pillow>=10.0.0
+tkinter-tooltip>=2.1.0
+
+# Speech Recognition (STT)
+RealtimeSTT>=0.1.6
+whisper-timestamped>=1.14.2
+pyaudio>=0.2.11
+sounddevice>=0.4.6
+librosa>=0.10.1
+
 # Terminal Interface
 colorama>=0.4.6
 
@@ -24,16 +36,33 @@ colorama>=0.4.6
 numpy>=1.24.0
 pandas>=2.1.0
 tqdm>=4.66.0
-colorama>=0.4.6
 psutil>=5.9.0
 pyyaml>=6.0.1
 python-dotenv>=1.0.0
+asyncio>=3.4.3; python_version < "3.7"
+aiofiles>=23.2.1
 
 # Discord Bot
 discord.py>=2.3.0
 
-# Text Processing
+# Text Processing and Conversion
 opencc-python-reimplemented>=0.1.7
+zhconv>=1.4.3
+
+# Audio Processing
+webrtcvad>=2.0.10
+silero-vad>=4.0.1
+
+# System and Process Management
+multiprocessing-logging>=0.3.4
 
 # Windows optimization
 pywin32>=306; sys_platform == "win32"
+winsound>=0.37; sys_platform == "win32"
+
+# Optional: GPU acceleration support
+nvidia-ml-py>=12.535.108
+
+# Development and Testing (optional)
+pytest>=7.4.0
+pytest-asyncio>=0.21.1
