@@ -15,6 +15,7 @@
 > 與真人潤羽露西亞仍有差距，未來會持續更新、增加更多特性，  
 > 期待有一天能成為 AI VTuber (X)
 
+
 - [Discord](https://discord.gg/UxwTqpvepr)  
 - [Facebook](https://www.facebook.com/chen.yang.974808)  
 - [Instagram](https://www.instagram.com/young20160124/)
