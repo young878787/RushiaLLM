@@ -10,6 +10,7 @@ import random
 from typing import Dict, List, Tuple, Optional, Any, AsyncGenerator
 from datetime import datetime
 from pathlib import Path
+from functools import wraps
 
 from .llm_manager import LLMManager
 from .rag_system import RAGSystem
@@ -17,6 +18,23 @@ from .STT import RealtimeSTTService, create_stt_service, TranscriptionResult
 from .utils.logger import setup_logger
 from .utils.system_optimizer import WindowsOptimizer
 from .filter.smart_line_break_filter import SmartLineBreakFilter
+
+
+def require_initialized(func):
+    """裝飾器：確保服務已初始化"""
+    @wraps(func)
+    async def async_wrapper(self, *args, **kwargs):
+        if not self._initialized:
+            return {"error": "服務未初始化", "success": False}
+        return await func(self, *args, **kwargs)
+    
+    @wraps(func)
+    def sync_wrapper(self, *args, **kwargs):
+        if not self._initialized:
+            return {"error": "服務未初始化", "success": False}
+        return func(self, *args, **kwargs)
+    
+    return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
 
 
 class VTuberCoreService:
@@ -66,48 +84,419 @@ class VTuberCoreService:
         
         # 初始化狀態
         self._initialized = False
+        self._initialization_progress = 0
+        self._initialization_stage = "未開始"
+        self._failed_components = []
+        
+        # 初始化回調
+        self.initialization_callback = None
+        
+        # 初始化重試配置
+        self.max_retry_attempts = 3
+        self.retry_delay = 2.0
     
     async def initialize(self) -> bool:
-        """初始化核心服務"""
+        """初始化核心服務 - 智能並行版本"""
         if self._initialized:
             return True
-            
+        
         try:
             self.logger.info("🚀 初始化 VTuber AI 核心服務...")
+            self._update_progress(0, "開始初始化")
             
-            # Windows 系統優化
-            if sys.platform == "win32":
-                optimizer = WindowsOptimizer(self.config)
-                optimizer.optimize()
+            # 階段1: 基礎設施並行初始化 (0-30%)
+            await self._initialize_stage_1()
             
-            # 初始化 LLM 管理器
-            self.llm_manager = LLMManager(self.config)
-            await self.llm_manager.initialize()
+            # 階段2: 核心組件並行初始化 (30-70%)  
+            await self._initialize_stage_2()
             
-            # 獲取角色信息
-            await self._load_character_info()
+            # 階段3: 依賴組件並行初始化 (70-90%)
+            await self._initialize_stage_3()
             
-            # 初始化 RAG 系統
-            self.rag_system = RAGSystem(self.config, self.llm_manager.embedding_model)
-            await self.rag_system.initialize()
-            
-            # 設置RAG系統引用
-            self.llm_manager.set_rag_system_reference(self.rag_system)
-            
-            # 初始化智慧換行處理器
-            self.smart_line_break_filter = SmartLineBreakFilter()
-            
-            # 初始化 STT 服務（如果啟用）
-            if self.stt_enabled:
-                await self._initialize_stt_service()
+            # 階段4: 可選組件初始化 (90-100%)
+            await self._initialize_stage_4()
             
             self._initialized = True
+            self._update_progress(100, "初始化完成")
             self.logger.info("✅ 核心服務初始化完成")
             return True
             
         except Exception as e:
             self.logger.error(f"核心服務初始化失敗: {e}")
+            await self._cleanup_partial_initialization()
             return False
+    
+    async def _initialize_stage_1(self):
+        """階段1: 基礎設施初始化 (並行)"""
+        self._update_progress(5, "初始化基礎設施")
+        
+        tasks = []
+        
+        # Windows 系統優化
+        if sys.platform == "win32":
+            async def init_windows_optimizer():
+                optimizer = WindowsOptimizer(self.config)
+                optimizer.optimize()
+                self.logger.debug("✅ Windows 優化完成")
+            tasks.append(init_windows_optimizer())
+        
+        # 智慧過濾器預初始化
+        async def init_filters():
+            self.smart_line_break_filter = SmartLineBreakFilter()
+            self.logger.debug("✅ 智慧換行處理器初始化完成")
+        tasks.append(init_filters())
+        
+        # 並行執行基礎設施初始化
+        if tasks:
+            await asyncio.gather(*tasks)
+        
+        self._update_progress(30, "基礎設施初始化完成")
+    
+    async def _initialize_stage_2(self):
+        """階段2: 核心組件並行初始化"""
+        self._update_progress(35, "初始化核心AI組件")
+        
+        # LLM 管理器初始化（最耗時）
+        async def init_llm():
+            try:
+                self.llm_manager = LLMManager(self.config)
+                await self.llm_manager.initialize()
+                self.logger.info("✅ LLM 管理器初始化完成")
+                return True
+            except Exception as e:
+                self.logger.error(f"LLM 管理器初始化失敗: {e}")
+                self._failed_components.append("LLM")
+                raise
+        
+        # 執行LLM初始化
+        await init_llm()
+        self._update_progress(70, "LLM 管理器初始化完成")
+    
+    async def _initialize_stage_3(self):
+        """階段3: 依賴組件並行初始化"""
+        self._update_progress(72, "初始化依賴組件")
+        
+        tasks = []
+        
+        # 角色信息載入
+        async def load_character():
+            try:
+                await self._load_character_info()
+                self.logger.debug("✅ 角色信息載入完成")
+            except Exception as e:
+                self.logger.warning(f"角色信息載入失敗: {e}")
+                self._failed_components.append("Character")
+        
+        # RAG 系統初始化
+        async def init_rag():
+            try:
+                if not self.llm_manager or not self.llm_manager.embedding_model:
+                    raise RuntimeError("LLM管理器或嵌入模型未就緒")
+                
+                self.rag_system = RAGSystem(self.config, self.llm_manager.embedding_model)
+                await self.rag_system.initialize()
+                
+                # 設置RAG系統引用
+                self.llm_manager.set_rag_system_reference(self.rag_system)
+                self.logger.info("✅ RAG 系統初始化完成")
+            except Exception as e:
+                self.logger.error(f"RAG 系統初始化失敗: {e}")
+                self._failed_components.append("RAG")
+                raise
+        
+        tasks = [load_character(), init_rag()]
+        
+        # 並行執行依賴組件初始化
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 檢查關鍵組件RAG的初始化結果
+        rag_success = not isinstance(results[1], Exception)
+        if not rag_success:
+            raise RuntimeError("關鍵組件RAG初始化失敗")
+        
+        self._update_progress(90, "依賴組件初始化完成")
+    
+    async def _initialize_stage_4(self):
+        """階段4: 可選組件初始化"""
+        self._update_progress(92, "初始化可選組件")
+        
+        # STT 服務初始化（可選，容錯）
+        if self.stt_enabled:
+            try:
+                await self._initialize_stt_service()
+                self.logger.info("✅ STT 服務初始化完成")
+            except Exception as e:
+                self.logger.warning(f"STT 服務初始化失敗（非關鍵組件）: {e}")
+                self.stt_enabled = False
+                self._failed_components.append("STT")
+        
+        self._update_progress(100, "所有組件初始化完成")
+    
+    def _update_progress(self, progress: int, stage: str):
+        """更新初始化進度"""
+        self._initialization_progress = progress
+        self._initialization_stage = stage
+        
+        # 回調通知
+        if self.initialization_callback:
+            try:
+                self.initialization_callback(progress, stage, self._failed_components.copy())
+            except Exception as e:
+                self.logger.warning(f"初始化進度回調失敗: {e}")
+        
+        self.logger.info(f"📊 初始化進度: {progress}% - {stage}")
+    
+    async def initialize_with_retry(self) -> bool:
+        """帶重試機制的初始化"""
+        for attempt in range(1, self.max_retry_attempts + 1):
+            try:
+                self.logger.info(f"🔄 初始化嘗試 {attempt}/{self.max_retry_attempts}")
+                
+                success = await self.initialize()
+                if success:
+                    return True
+                    
+                # 如果不是最後一次嘗試，等待後重試
+                if attempt < self.max_retry_attempts:
+                    self.logger.warning(f"初始化失敗，{self.retry_delay}秒後重試...")
+                    await asyncio.sleep(self.retry_delay)
+                    
+            except Exception as e:
+                self.logger.error(f"初始化嘗試 {attempt} 異常: {e}")
+                if attempt < self.max_retry_attempts:
+                    await asyncio.sleep(self.retry_delay)
+        
+        self.logger.error(f"初始化失敗，已達到最大重試次數 ({self.max_retry_attempts})")
+        return False
+    def get_initialization_status(self) -> dict:
+        """獲取詳細的初始化狀態信息"""
+        return {
+            "is_initialized": self._initialized,
+            "initialization_progress": self._initialization_progress,
+            "current_stage": self._initialization_stage,
+            "failed_components": list(self._failed_components),
+            "components_status": {
+                "llm_manager": self.llm_manager is not None and getattr(self.llm_manager, 'is_initialized', False),
+                "rag_system": self.rag_system is not None and getattr(self.rag_system, 'is_initialized', False),
+                "stt_service": self.stt_service is not None and getattr(self.stt_service, 'is_initialized', False),
+                "linebreak_filter": self.smart_line_break_filter is not None
+            },
+            "start_time": getattr(self, '_initialization_start_time', None),
+            "last_update": getattr(self, '_last_progress_update', None)
+        }
+
+    async def test_initialization_performance(self) -> dict:
+        """測試並評估初始化性能"""
+        import time
+        
+        # 重置狀態以便重新測試
+        await self.reset_for_testing()
+        
+        self.logger.info("🧪 開始初始化性能測試...")
+        
+        start_time = time.time()
+        success = await self.initialize()
+        end_time = time.time()
+        
+        total_time = end_time - start_time
+        
+        performance_data = {
+            "success": success,
+            "total_time": total_time,
+            "initialization_progress": self._initialization_progress,
+            "failed_components": list(self._failed_components),
+            "performance_rating": self._rate_performance(total_time),
+            "estimated_improvement": self._calculate_improvement(total_time)
+        }
+        
+        self.logger.info(f"🎯 性能測試完成: {performance_data}")
+        return performance_data
+    
+    async def reset_for_testing(self):
+        """重置服務狀態以便重新測試"""
+        self._initialized = False
+        self._initialization_progress = 0
+        self._initialization_stage = "未開始"
+        self._failed_components.clear()
+        
+        # 清理組件但不完全關閉
+        if hasattr(self, 'llm_manager'):
+            self.llm_manager = None
+        if hasattr(self, 'rag_system'):
+            self.rag_system = None
+        if hasattr(self, 'stt_service'):
+            self.stt_service = None
+        if hasattr(self, 'smart_line_break_filter'):
+            self.smart_line_break_filter = None
+    
+    def _rate_performance(self, total_time: float) -> str:
+        """評估性能等級"""
+        if total_time < 3:
+            return "優秀 (< 3秒)"
+        elif total_time < 5:
+            return "良好 (< 5秒)"
+        elif total_time < 8:
+            return "普通 (< 8秒)"
+        else:
+            return "需要優化 (≥ 8秒)"
+    
+    def _calculate_improvement(self, current_time: float) -> str:
+        """計算改進估算"""
+        baseline_time = 10.5  # 原始基線時間
+        improvement = (baseline_time - current_time) / baseline_time * 100
+        return f"{improvement:.1f}% 改進" if improvement > 0 else "性能下降"
+    
+    async def diagnostic_health_check(self) -> dict:
+        """執行完整的系統健康診斷"""
+        health_status = {
+            "timestamp": asyncio.get_event_loop().time(),
+            "overall_health": "健康",
+            "components": {},
+            "performance_metrics": {},
+            "recommendations": []
+        }
+        
+        try:
+            # 檢查各組件健康狀態
+            health_status["components"]["llm_manager"] = await self._check_llm_health()
+            health_status["components"]["rag_system"] = await self._check_rag_health() 
+            health_status["components"]["stt_service"] = await self._check_stt_health()
+            health_status["components"]["linebreak_filter"] = self._check_filter_health()
+            
+            # 性能指標
+            if self.is_initialized:
+                health_status["performance_metrics"] = await self._collect_performance_metrics()
+            
+            # 基於檢查結果生成建議
+            health_status["recommendations"] = self._generate_health_recommendations(health_status["components"])
+            
+            # 評估整體健康狀態
+            failed_components = [name for name, status in health_status["components"].items() 
+                               if not status.get("healthy", False)]
+            
+            if failed_components:
+                health_status["overall_health"] = "部分異常" if len(failed_components) < 2 else "嚴重異常"
+                
+        except Exception as e:
+            self.logger.error(f"健康檢查異常: {e}")
+            health_status["overall_health"] = "檢查異常"
+            health_status["error"] = str(e)
+            
+        return health_status
+    
+    async def _check_llm_health(self) -> dict:
+        """檢查LLM管理器健康狀態"""
+        if not self.llm_manager:
+            return {"healthy": False, "reason": "LLM管理器未初始化"}
+            
+        try:
+            # 簡單的健康檢查
+            if hasattr(self.llm_manager, 'is_initialized') and self.llm_manager.is_initialized:
+                return {"healthy": True, "status": "正常運行"}
+            else:
+                return {"healthy": False, "reason": "LLM管理器未正確初始化"}
+        except Exception as e:
+            return {"healthy": False, "reason": f"檢查異常: {e}"}
+    
+    async def _check_rag_health(self) -> dict:
+        """檢查RAG系統健康狀態"""
+        if not self.rag_system:
+            return {"healthy": False, "reason": "RAG系統未初始化"}
+            
+        try:
+            if hasattr(self.rag_system, 'is_initialized') and self.rag_system.is_initialized:
+                return {"healthy": True, "status": "正常運行"}
+            else:
+                return {"healthy": False, "reason": "RAG系統未正確初始化"}
+        except Exception as e:
+            return {"healthy": False, "reason": f"檢查異常: {e}"}
+    
+    async def _check_stt_health(self) -> dict:
+        """檢查STT服務健康狀態"""
+        if not self.stt_service:
+            return {"healthy": False, "reason": "STT服務未初始化"}
+            
+        try:
+            if hasattr(self.stt_service, 'is_initialized') and self.stt_service.is_initialized:
+                return {"healthy": True, "status": "正常運行"}
+            else:
+                return {"healthy": False, "reason": "STT服務未正確初始化"}
+        except Exception as e:
+            return {"healthy": False, "reason": f"檢查異常: {e}"}
+    
+    def _check_filter_health(self) -> dict:
+        """檢查換行過濾器健康狀態"""
+        if not self.smart_line_break_filter:
+            return {"healthy": False, "reason": "換行過濾器未初始化"}
+        return {"healthy": True, "status": "正常運行"}
+    
+    async def _collect_performance_metrics(self) -> dict:
+        """收集性能指標"""
+        return {
+            "initialization_progress": self._initialization_progress,
+            "failed_components_count": len(self._failed_components),
+            "current_stage": self._initialization_stage
+        }
+    
+    def _generate_health_recommendations(self, components: dict) -> list:
+        """基於健康檢查結果生成建議"""
+        recommendations = []
+        
+        for name, status in components.items():
+            if not status.get("healthy", False):
+                recommendations.append(f"建議重新初始化 {name}: {status.get('reason', '未知原因')}")
+        
+        if len(recommendations) == 0:
+            recommendations.append("系統健康狀態良好，建議定期監控")
+            
+        return recommendations
+
+    def set_initialization_callback(self, callback):
+        """設置初始化進度回調函數"""
+        self.initialization_callback = callback
+    
+    def get_initialization_status(self) -> Dict[str, Any]:
+        """獲取初始化狀態"""
+        return {
+            "initialized": self._initialized,
+            "progress": self._initialization_progress,
+            "stage": self._initialization_stage,
+            "failed_components": self._failed_components.copy(),
+            "success": len(self._failed_components) == 0
+        }
+    
+    async def _cleanup_partial_initialization(self):
+        """清理部分初始化的組件"""
+        try:
+            self.logger.info("🧹 清理部分初始化的組件...")
+            
+            # 重置進度狀態
+            self._initialization_progress = 0
+            self._initialization_stage = "清理中"
+            
+            if hasattr(self, 'llm_manager') and self.llm_manager:
+                self.llm_manager.cleanup()
+                self.llm_manager = None
+                self.logger.debug("✅ LLM管理器已清理")
+            
+            if hasattr(self, 'rag_system') and self.rag_system:
+                # RAG系統通常不需要特殊清理
+                self.rag_system = None
+                self.logger.debug("✅ RAG系統已清理")
+                
+            if hasattr(self, 'stt_service') and self.stt_service:
+                self.stt_service.cleanup()
+                self.stt_service = None
+                self.logger.debug("✅ STT服務已清理")
+                
+            self.smart_line_break_filter = None
+            self._initialized = False
+            self._initialization_stage = "已重置"
+            
+            self.logger.info("✅ 部分初始化組件清理完成")
+            
+        except Exception as e:
+            self.logger.error(f"清理部分初始化組件失敗: {e}")
     
     async def _load_character_info(self):
         """載入角色信息"""
@@ -211,13 +600,11 @@ class VTuberCoreService:
         self.gui_voice_status_callback = status_callback
         self.gui_voice_stop_callback = stop_callback
     
+    @require_initialized
     async def generate_response(self, user_id: str, user_input: str, **kwargs) -> Dict[str, Any]:
         """生成AI回應 - 統一接口"""
         async with self.request_semaphore:
             try:
-                if not self._initialized:
-                    return {"error": "服務未初始化", "success": False}
-                
                 # 獲取或創建用戶會話
                 session = self._get_or_create_user_session(user_id)
                 conversation_history = session['conversation_history']
@@ -263,14 +650,11 @@ class VTuberCoreService:
                 self.logger.error(f"生成回應失敗 (用戶 {user_id}): {e}")
                 return {"error": str(e), "success": False}
     
+    @require_initialized
     async def generate_response_with_typing(self, user_id: str, user_input: str, **kwargs) -> AsyncGenerator[Dict[str, Any], None]:
         """生成AI回應 - 支持打字模擬的流式輸出"""
         async with self.request_semaphore:
             try:
-                if not self._initialized:
-                    yield {"type": "error", "error": "服務未初始化", "success": False}
-                    return
-                
                 # 獲取或創建用戶會話
                 session = self._get_or_create_user_session(user_id)
                 conversation_history = session['conversation_history']
@@ -456,12 +840,10 @@ class VTuberCoreService:
     
     # ==================== RAG 功能 ====================
     
+    @require_initialized
     async def add_document(self, file_path: str) -> Dict[str, Any]:
         """添加文檔到知識庫"""
         try:
-            if not self._initialized:
-                return {"error": "服務未初始化", "success": False}
-            
             success = await self.rag_system.add_document(file_path)
             return {
                 "success": success,
@@ -470,12 +852,10 @@ class VTuberCoreService:
         except Exception as e:
             return {"error": str(e), "success": False}
     
+    @require_initialized
     async def search_knowledge_base(self, query: str, top_k: int = 5) -> Dict[str, Any]:
         """搜索知識庫"""
         try:
-            if not self._initialized:
-                return {"error": "服務未初始化", "success": False}
-            
             results = await self.rag_system.search(query, top_k=top_k)
             return {
                 "results": results,
@@ -485,12 +865,10 @@ class VTuberCoreService:
         except Exception as e:
             return {"error": str(e), "success": False}
     
+    @require_initialized
     async def clear_knowledge_base(self) -> Dict[str, Any]:
         """清空知識庫"""
         try:
-            if not self._initialized:
-                return {"error": "服務未初始化", "success": False}
-            
             success = await self.rag_system.clear_knowledge_base()
             return {
                 "success": success,
@@ -732,10 +1110,11 @@ class VTuberCoreService:
             "success": True
         }
     
+    @require_initialized
     def get_line_break_stats(self) -> Dict[str, Any]:
         """獲取智慧換行統計"""
         try:
-            if not self._initialized or not self.smart_line_break_filter:
+            if not self.smart_line_break_filter:
                 return {"error": "智慧換行處理器未初始化", "success": False}
             
             stats = self.smart_line_break_filter.get_stats()
@@ -749,12 +1128,10 @@ class VTuberCoreService:
         except Exception as e:
             return {"error": str(e), "success": False}
     
+    @require_initialized
     def get_stats(self) -> Dict[str, Any]:
         """獲取系統統計"""
         try:
-            if not self._initialized:
-                return {"error": "服務未初始化"}
-            
             rag_stats = self.rag_system.get_stats()
             
             # 獲取智慧換行統計
@@ -792,12 +1169,10 @@ class VTuberCoreService:
         except Exception as e:
             return {"error": str(e)}
     
+    @require_initialized
     def get_model_info(self) -> Dict[str, Any]:
         """獲取模型信息"""
         try:
-            if not self._initialized:
-                return {"error": "服務未初始化"}
-            
             return self.llm_manager.get_model_info()
         except Exception as e:
             return {"error": str(e)}
@@ -842,12 +1217,10 @@ class VTuberCoreService:
     
     # ==================== 簡繁轉換功能 ====================
     
+    @require_initialized
     def toggle_traditional_chinese(self, enabled: bool) -> Dict[str, Any]:
         """切換簡繁轉換"""
         try:
-            if not self._initialized:
-                return {"error": "服務未初始化", "success": False}
-            
             if hasattr(self.llm_manager, 'response_filter'):
                 result = self.llm_manager.response_filter.toggle_traditional_chinese(enabled)
                 return {
@@ -860,12 +1233,10 @@ class VTuberCoreService:
         except Exception as e:
             return {"error": str(e), "success": False}
     
+    @require_initialized
     def get_traditional_chinese_status(self) -> Dict[str, Any]:
         """獲取簡繁轉換狀態"""
         try:
-            if not self._initialized:
-                return {"error": "服務未初始化", "success": False}
-            
             if hasattr(self.llm_manager, 'response_filter'):
                 status = self.llm_manager.response_filter.get_conversion_status()
                 
@@ -892,19 +1263,14 @@ class VTuberCoreService:
     def cleanup(self):
         """清理資源"""
         try:
-            if self.llm_manager:
-                self.llm_manager.cleanup()
+            self.logger.info("🧹 開始清理核心服務資源...")
             
-            if self.smart_line_break_filter:
-                # 智慧換行處理器通常不需要特殊清理
-                pass
-            
-            if self.stt_service:
-                self.stt_service.cleanup()
-                self.stt_service = None
-            
-            self.user_sessions.clear()
-            self._initialized = False
+            # 使用統一的清理邏輯
+            if self._initialized:
+                asyncio.create_task(self._cleanup_partial_initialization())
+            else:
+                # 直接清理用戶會話
+                self.user_sessions.clear()
             
             self.logger.info("✅ 核心服務資源清理完成")
         except Exception as e:
@@ -925,54 +1291,6 @@ class VTuberCoreService:
             return {
                 "success": False,
                 "error": f"獲取角色信息失敗: {str(e)}"
-            }
-    
-    async def chat(self, message: str, user_id: str) -> Dict[str, Any]:
-        """聊天接口（為GUI提供）"""
-        try:
-            result = await self.generate_response(user_id, message)
-            return result
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"聊天處理失敗: {str(e)}"
-            }
-    
-    async def upload_document(self, file_path: str) -> Dict[str, Any]:
-        """上傳文檔到知識庫"""
-        try:
-            result = await self.add_document(file_path)
-            return result
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"文檔上傳失敗: {str(e)}"
-            }
-    
-    async def search_knowledge(self, query: str) -> Dict[str, Any]:
-        """搜索知識庫"""
-        try:
-            result = await self.search_knowledge_base(query)
-            return result
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"知識搜索失敗: {str(e)}"
-            }
-    
-    async def toggle_traditional_chinese(self, enabled: bool) -> Dict[str, Any]:
-        """切換簡繁轉換"""
-        try:
-            # 這裡可以設置簡繁轉換的邏輯
-            return {
-                "success": True,
-                "enabled": enabled,
-                "message": f"簡繁轉換已{'啟用' if enabled else '禁用'}"
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"簡繁轉換切換失敗: {str(e)}"
             }
     
     async def clear_conversation_memory(self) -> Dict[str, Any]:

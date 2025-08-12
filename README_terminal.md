@@ -13,7 +13,7 @@
 ## 系統需求
 - Windows 11
 - Python 3.9+
-- NVIDIA GPU (建議8GB+ VRAM)
+- NVIDIA GPU (建議12GB+ VRAM)
 - 16GB+ RAM
 
 ## 快速開始

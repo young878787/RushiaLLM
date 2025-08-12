@@ -92,7 +92,7 @@ vtuber:
 
 # STT 語音識別配置
 stt:
-  enabled: true                        # 啟用 STT 語音識別
+  enabled: false                       # 禁用 STT 語音識別 (Discord Bot 不需要)
   auto_response: false                 # 自動回應語音輸入（false表示僅預覽，需手動發送）
   auto_stop_after_transcription: true  # 收到轉錄結果後自動停止監聽（設為true以避免持續收音）
   
