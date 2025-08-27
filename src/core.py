@@ -54,9 +54,11 @@ class RushiaPersonalityCore:
     def initialize_semantic_analysis(self):
         """初始化語義分析系統"""
         try:
-            from .semantic_analysis import SemanticAnalysisManager
+            # 🔥 修復：使用正確的模組路徑導入
+            from semantic_analysis import SemanticAnalysisManager
             self.semantic_manager = SemanticAnalysisManager(chat_instance=self)
-            self.logger.info("✅ 情感理解系統已啟動")
+            self._semantic_enabled = True
+            self.logger.info("✅ 語義分析系統已啟動")
             return True
         except ImportError as e:
             self.logger.warning(f"⚠️ 語義分析模組不可用，使用基礎模式: {e}")

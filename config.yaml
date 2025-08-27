@@ -3,10 +3,52 @@
 # 模型配置
 models:
   llm:
-    model_path: "models/Qwen3-8B"
+    model_path: "models/Qwen3-8B"  # 相對路徑
     device: "cuda"
-    quantization: "4bit"
+    
+    # 🔥 新增：載入模式選擇
+    loading_mode: "transformers"    # "transformers" 或 "vllm"
+    
+    # Transformers 模式配置
+    quantization: "4bit"         # 改為4bit量化獲得更好性能
+    optimization_mode: "auto"    # auto, deepspeed, 8bit, fp16
     max_length: 4096
+
+    # 🔥 多GPU配置
+    multi_gpu:
+      enabled: true
+      primary_gpus: 4          # 主模型使用的GPU數量
+      embedding_gpu: 4         # 嵌入模型使用的GPU索引
+      memory_optimization: true
+      auto_device_map: true
+
+    # vLLM 模式配置
+    vllm:
+      # GPU 配置
+      tensor_parallel_size: "auto"     # "auto" 或指定數量，如 4
+      pipeline_parallel_size: 1        # 管道並行大小
+      gpu_memory_utilization: 0.8     # GPU記憶體使用率 (0.7-0.95)
+      swap_space: 0.5                    # 交換空間大小 (GB)
+      
+      # 模型配置
+      max_model_len: 8192              # 模型最大長度 (
+      max_num_seqs: 128                # 最大並發序列數 (降低到128)
+      max_num_batched_tokens: null     # 最大批次token數 (null為自動)
+      
+      # 性能配置
+      quantization: "8bit"              # null, "awq", "gptq", "fp8"
+      dtype: "half"                    # "half", "float", "bfloat16"
+      kv_cache_dtype: "auto"           # "auto", "fp8", "fp16"
+      
+      # 引擎配置
+      worker_use_ray: false            # 是否使用Ray
+      engine_use_ray: false            # 引擎是否使用Ray
+      disable_log_stats: false         # 禁用統計日誌
+      disable_log_requests: true       # 禁用請求日誌
+      
+      # 調度器配置
+      max_paddings: 256                # 最大填充數量
+    
     # 優化的生成參數
     temperature: 0.75
     top_p: 0.8
@@ -14,13 +56,16 @@ models:
     repetition_penalty: 1.15
     no_repeat_ngram_size: 3
     length_penalty: 1.0
-    early_stopping: true
     
   embedding:
     model_path: "models/Qwen3-Embedding-0.6B"
     device: "cuda"
     batch_size: 32
     max_length: 512
+    # 🔥 新增：嵌入模型多GPU配置
+    multi_gpu:
+      preferred_gpu: 4         # 優先使用的GPU
+      fallback_auto: true      # 自動回退
 
 # RAG 配置
 rag:
@@ -156,9 +201,22 @@ api:
   log_level: "info"
   cors_origins: ["*"]
 
+# 🚀 性能優化配置 - 模型加速設置
+performance:
+  # 靜態KV緩存優化
+  enable_static_cache: true           # 啟用靜態KV緩存（提升15-25%速度）
+  max_cache_length: 2048              # 最大緩存長度（多GPU自動調整到3072）
+  
+  # Torch Compile優化  
+  enable_torch_compile: true          # 啟用Torch編譯優化（提升20-40%速度）
+  
+  # 其他優化選項
+  enable_speed_optimization: true     # 總體速度優化開關
+  use_4bit_quantization: false        # 4bit量化（暫不使用，保持8bit）
+  use_flash_attention: false          # Flash Attention（暫不使用）
+
 # 系統優化 (Windows 11)
 system:
-
   performance_optimization:
     enable_llm_cache: true
     cache_size: 500
@@ -187,14 +245,23 @@ integration_status:
   knowledge_base_integration: true     # 知識庫整合
   human_like_responses: true           # 人性化回應
   
+  # 🚀 新增：性能優化狀態
+  performance_optimizations: true      # 性能優化整合
+  static_kv_cache: true                # 靜態KV緩存
+  torch_compile: true                  # Torch編譯優化
+  model_acceleration: true             # 模型加速
+  
   # 整合版本信息
-  integration_version: "1.0.0"
-  last_updated: "2024-12-19"
+  integration_version: "1.1.0"         # 更新版本號
+  last_updated: "2025-08-18"           # 更新日期
   features_enabled: [
     "深度情感理解",
     "語義增強檢索", 
     "人性化提示詞生成",
     "動態參數調整",
     "親密度感知",
-    "智能風格匹配"
+    "智能風格匹配",
+    "靜態KV緩存優化",                  # 新增
+    "Torch編譯加速",                   # 新增
+    "組合優化策略"                     # 新增
   ]

@@ -82,7 +82,7 @@ class ResponseFilter:
         self.boundary_token = "<|end|>"
         
         # 句子結束標記
-        self.sentence_endings = ['。', '！', '？', '.', '!', '?', '~', '♪', '♡']
+        self.sentence_endings = ['。', '！', '.', '!', '~', '♪', '♡']
         
         # 免責聲明模式
         self.disclaimer_patterns = [

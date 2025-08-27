@@ -397,7 +397,7 @@ class SmartLineBreakFilter(BaseResponseFilter):
         # 確保句子有適當的結尾
         if sentence and not re.search(r'[。！？♪♡～.!?]$', sentence):
             # 根據內容添加適當的結尾
-            if any(word in sentence for word in ['嗎', '呢', '吧', '?']):
+            if any(word in sentence for word in ['嗎', '呢', '吧', '?','~']):
                 if not sentence.endswith('?'):
                     sentence += '？'
             elif any(word in sentence for word in ['！', '!', '太', '真', '好', '棒']):

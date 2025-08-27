@@ -1261,16 +1261,53 @@ class VTuberCoreService:
             return {"error": str(e), "success": False}
     
     def cleanup(self):
-        """清理資源"""
+        """清理資源 - 同步版本，確保完全清理"""
         try:
             self.logger.info("🧹 開始清理核心服務資源...")
             
-            # 使用統一的清理邏輯
+            # 🔥 修復：直接同步調用清理方法，不使用異步任務
             if self._initialized:
-                asyncio.create_task(self._cleanup_partial_initialization())
-            else:
-                # 直接清理用戶會話
+                # 直接同步清理各個組件
+                try:
+                    # 清理 LLM 管理器 - 這會調用 vLLM 的 cleanup_models()
+                    if hasattr(self, 'llm_manager') and self.llm_manager:
+                        self.logger.info("🔧 清理 LLM 管理器...")
+                        self.llm_manager.cleanup()
+                        self.logger.info("✅ LLM 管理器已清理")
+                except Exception as e:
+                    self.logger.error(f"清理 LLM 管理器失敗: {e}")
+                
+                try:
+                    # 清理 RAG 系統
+                    if hasattr(self, 'rag_system') and self.rag_system:
+                        self.logger.info("🔧 清理 RAG 系統...")
+                        # RAG系統通常不需要特殊清理，但清理引用
+                        self.rag_system = None
+                        self.logger.info("✅ RAG 系統已清理")
+                except Exception as e:
+                    self.logger.error(f"清理 RAG 系統失敗: {e}")
+                
+                try:
+                    # 清理 STT 服務
+                    if hasattr(self, 'stt_service') and self.stt_service:
+                        self.logger.info("🔧 清理 STT 服務...")
+                        if hasattr(self.stt_service, 'cleanup'):
+                            self.stt_service.cleanup()
+                        self.stt_service = None
+                        self.logger.info("✅ STT 服務已清理")
+                except Exception as e:
+                    self.logger.error(f"清理 STT 服務失敗: {e}")
+            
+            # 清理用戶會話
+            try:
                 self.user_sessions.clear()
+                self.logger.info("✅ 用戶會話已清理")
+            except Exception as e:
+                self.logger.error(f"清理用戶會話失敗: {e}")
+            
+            # 標記為未初始化
+            self._initialized = False
+            self._initialization_stage = "已清理"
             
             self.logger.info("✅ 核心服務資源清理完成")
         except Exception as e:

@@ -8,6 +8,7 @@ import asyncio
 import logging
 import sys
 import os
+import signal
 from pathlib import Path
 import yaml
 import colorama
@@ -17,6 +18,9 @@ from src.core_service import VTuberCoreService
 from src.utils.logger import setup_logger
 
 colorama.init()
+
+# 全局變量存儲核心服務，用於信號處理
+_global_core_service = None
 
 def load_config(config_path: str = "config.yaml") -> dict:
     """載入配置文件，並將所有相對路徑轉為以專案根目錄為基準的絕對路徑"""
@@ -40,6 +44,26 @@ def load_config(config_path: str = "config.yaml") -> dict:
     except yaml.YAMLError as e:
         print(f"❌ 配置文件解析錯誤: {e}")
         sys.exit(1)
+
+
+def signal_handler(sig, frame):
+    """信號處理器 - 確保一次 Ctrl+C 就能完全退出"""
+    global _global_core_service
+    
+    print(f"\n{Fore.YELLOW}👋 檢測到 Ctrl+C (信號 {sig})，正在強制退出...{Style.RESET_ALL}")
+    
+    # 立即清理核心服務
+    if _global_core_service:
+        try:
+            print(f"{Fore.CYAN}🧹 執行強制清理...{Style.RESET_ALL}")
+            _global_core_service.cleanup()
+            print(f"{Fore.GREEN}✅ 強制清理完成{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}❌ 強制清理失敗: {e}{Style.RESET_ALL}")
+    
+    # 強制退出
+    print(f"{Fore.YELLOW}🚪 程序強制退出{Style.RESET_ALL}")
+    sys.exit(0)
 
     
 
@@ -606,6 +630,12 @@ class VTuberTerminal:
 
 async def main():
     """主函數"""
+    global _global_core_service
+    
+    # 🔥 設置信號處理器 - 確保一次 Ctrl+C 就能退出
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     try:
         # 載入配置
         config = load_config()
@@ -632,6 +662,9 @@ async def main():
         terminal = VTuberTerminal(config)
         await terminal.initialize()
         
+        # 🔥 設置全局核心服務引用，供信號處理器使用
+        _global_core_service = terminal.core_service
+        
         # 顯示歡迎信息
         terminal.print_welcome()
         
@@ -646,8 +679,14 @@ async def main():
         
     except KeyboardInterrupt:
         print(f"\n{Fore.YELLOW}👋 程序被用戶中斷{Style.RESET_ALL}")
+        # 清理資源
+        if _global_core_service:
+            _global_core_service.cleanup()
     except Exception as e:
         print(f"❌ 啟動失敗: {e}")
+        # 清理資源
+        if _global_core_service:
+            _global_core_service.cleanup()
         sys.exit(1)
 
 
