@@ -15,6 +15,9 @@
 > 與真人潤羽露西亞仍有差距，未來會持續更新、增加更多特性，  
 > 期待有一天能成為 AI VTuber (X)
 
+更新紀錄
+- 8/27 新增對vllm的支持 在linux上 比原本transformers快了將近30秒上下(原為40秒左右一段話)，不用等很久了
+
 
 - [Discord](https://discord.gg/UxwTqpvepr)  
 - [Facebook](https://www.facebook.com/chen.yang.974808)  
@@ -27,6 +30,7 @@
 - 💬 **多種界面**: 終端、Discord機器人、現代化GUI界面
 - ⚡ **智能優化**: 打字模擬效果、智慧換行、簡繁轉換
 - 🔧 **高度可配置**: 支援GPU加速、模型參數調整、系統優化
+- 🔧 **雙底層架構**: 支援多GPU，vllm或transformers供使用(✨linux才能使用vllm部署)
 
 ![gui介面](image-1.png)
 ![discord介面](image.png)
@@ -34,8 +38,9 @@
 ## 🚀 快速開始
 
 **重要提醒:**
-- 🎯 **GPU顯存至少需要12GB**，推薦16GB以上
+- 🎯 **GPU顯存至少需要16GB**，推薦16GB以上
 - 💾 模型文件約11GB 總佔用大概10.9-11
+- ✨linux才能使用vllm部署
 
 ### 環境要求
 
@@ -43,7 +48,7 @@
 - **Python**: 3.8-3.11 (建議3.10)
 - **CUDA**: 11.8+ / 12.x (GPU加速必需)
 - **驅動程式**: NVIDIA GeForce 驅動 520.61+
-- NVIDIA GPU (建議12GB+ VRAM 3060 4060ti 16G 4070 等)
+- NVIDIA GPU (建議16GB+ VRAM 4060ti 16G 4070 等)
 - 16GB+ RAM
 
 ### 安裝步驟
@@ -217,7 +222,12 @@ scrpitsV2/LLM/
 │
 ├── 🎯 核心源碼 (src/)
 │   ├── core_service.py            # 核心服務層，統一AI邏輯
-│   ├── llm_manager.py             # LLM模型管理器
+│   ├── llm_manager/               # LLM模型管理器
+│   │   ├── gpu_manager.py         # GPU管理器 多卡
+│   │   ├── llm_manger.py          # 調用llm的核心
+│   │   ├── model_loader.py        # transformers載入模型器
+│   │   ├── vllm_model_loader.py   # vllm載入模型器
+│   │   └── response_generator.py  # 回應生成器
 │   ├── rag_system.py              # RAG知識庫系統
 │   ├── STT.py                     # 語音識別服務
 │   ├── core.py                    # 露西亞人格核心
