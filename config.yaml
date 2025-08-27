@@ -10,7 +10,7 @@ models:
     loading_mode: "transformers"    # "transformers" 或 "vllm"
     
     # Transformers 模式配置
-    quantization: "4bit"         # 改為4bit量化獲得更好性能
+    quantization: "8bit"         # 改為8bit量化獲得更好性能
     optimization_mode: "auto"    # auto, deepspeed, 8bit, fp16
     max_length: 4096
 
